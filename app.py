@@ -26,11 +26,41 @@ ARQUIVOS = {
 # FUNÇÕES DE CARREGAMENTO (com cache)
 # ============================================================
 @st.cache_data
-def carregar_excel(caminho, header=4):
+def carregar_excel(caminho, skiprows=4):
+    """
+    Carrega um arquivo Excel pulando as linhas iniciais.
+    Assume que a linha com os cabeçalhos está em skiprows (0-indexado).
+    Se não encontrar, tenta com header=0.
+    """
     try:
-        return pd.read_excel(caminho, dtype=str, engine='openpyxl', header=header)
+        # Primeiro tenta com skiprows e header=0 (primeira linha após os pulos)
+        df = pd.read_excel(caminho, dtype=str, engine='openpyxl', skiprows=skiprows, header=0)
+        # Verifica se alguma coluna parece ser de dados (se todas as colunas forem nulas, pode ser erro)
+        if df.dropna(how='all').empty:
+            raise ValueError("Dados vazios após skiprows")
+        return df
     except Exception:
-        return None
+        # Fallback: tenta ler com header=0 sem skiprows
+        try:
+            df = pd.read_excel(caminho, dtype=str, engine='openpyxl', header=0)
+            if df.dropna(how='all').empty:
+                raise ValueError("Dados vazios com header=0")
+            return df
+        except Exception:
+            # Último recurso: tentar com header=None e depois definir colunas manualmente
+            df = pd.read_excel(caminho, dtype=str, engine='openpyxl', header=None)
+            # Procura a linha que contém os cabeçalhos conhecidos
+            for i, row in df.iterrows():
+                row_str = ' '.join(row.astype(str))
+                if 'Placa' in row_str or 'Nome Fornecedor' in row_str or 'CPF N°' in row_str:
+                    # Usa essa linha como cabeçalho
+                    new_header = row
+                    df = df.iloc[i+1:]
+                    df.columns = new_header
+                    df.reset_index(drop=True, inplace=True)
+                    return df
+            # Se não encontrar, retorna None
+            return None
 
 @st.cache_data
 def carregar_template(caminho):
@@ -51,7 +81,8 @@ def verificar_arquivos():
 # FUNÇÕES AUXILIARES
 # ============================================================
 def limpar_cpf_cnpj(val):
-    if pd.isna(val): return ''
+    if pd.isna(val) or val is None:
+        return ''
     return ''.join(filter(str.isdigit, str(val)))
 
 def formatar_cpf(cpf):
@@ -83,6 +114,7 @@ def safe_str(val):
     return str(val).strip()
 
 def normalizar_nome(nome):
+    if pd.isna(nome): return ''
     return ' '.join(str(nome).upper().split())
 
 meses = {1:'janeiro',2:'fevereiro',3:'março',4:'abril',5:'maio',6:'junho',
@@ -185,7 +217,7 @@ def buscar_veiculos_por_transportador(df_veic_antt, df_forn, termo):
         return []
     termo_norm = normalizar_nome(termo)
     # Filtrar fornecedores pelo nome
-    mask_forn = df_forn['Nome Fornecedor'].apply(normalizar_nome).str.contains(termo_norm, na=False)
+    mask_forn = df_forn['Nome Fornecedor'].apply(normalizar_nome).str.contains(termo_norm, na=False, case=False)
     fornecedores_filtrados = df_forn[mask_forn]
     if fornecedores_filtrados.empty:
         return []
@@ -312,13 +344,65 @@ def obter_veiculos_do_transportador(cnpj_prop, df_veic_antt, df_veic_compl, df_c
         })
     return veiculos
 
-# As demais funções (obter_motoristas_dos_veiculos, obter_todos_condutores_da_base, buscar_antt, buscar_serial) permanecem iguais às anteriores.
-# Vou mantê-las por brevidade, mas você deve incluí-las no script final.
-# Abaixo, apenas para completar, vou replicá-las de forma resumida.
+def obter_motoristas_dos_veiculos(veiculos, df_cond, df_forn):
+    """
+    Para uma lista de veículos, retorna uma lista de motoristas (CPF, Nome) únicos.
+    """
+    motoristas = {}
+    for v in veiculos:
+        cpf = v.get('mot_cpf', '')
+        if cpf:
+            if cpf not in motoristas:
+                nome = v.get('mot_nome', '')
+                if not nome:
+                    # Buscar nos dataframes
+                    m = df_cond[df_cond['CPF N°'].apply(limpar_cpf_cnpj) == cpf]
+                    if not m.empty:
+                        nome = safe_str(m.iloc[0]['Nome'])
+                    else:
+                        m2 = df_forn[df_forn['Cnpj/Cpf'].apply(limpar_cpf_cnpj) == cpf]
+                        if not m2.empty:
+                            nome = safe_str(m2.iloc[0]['Nome Fornecedor'])
+                motoristas[cpf] = nome
+    return [{'cpf': cpf, 'nome': nome} for cpf, nome in motoristas.items()]
 
-# (Aqui entrariam as funções obter_motoristas_dos_veiculos, etc. 
-#  Para não repetir todo o código, vou assumir que você já tem essas funções
-#  e vou continuar com a lógica de interface.)
+def obter_todos_condutores_da_base(df_cond):
+    """
+    Retorna todos os condutores da base para seleção manual.
+    """
+    condutores = []
+    for _, row in df_cond.iterrows():
+        cpf = limpar_cpf_cnpj(row.get('CPF N°', ''))
+        nome = safe_str(row.get('Nome', ''))
+        if cpf and nome:
+            condutores.append({'cpf': cpf, 'nome': nome})
+    return condutores
+
+def buscar_antt(placa, df_veic_antt):
+    """
+    Busca dados ANTT de um veículo pela placa.
+    """
+    placa_limpa = limpar_placa(placa)
+    mask = df_veic_antt['Placa'].apply(limpar_placa) == placa_limpa
+    if mask.any():
+        row = df_veic_antt[mask].iloc[0]
+        return {
+            'rntrc': safe_str(row.get('Rntrc', '')),
+            'renavan': safe_str(row.get('Renavan', '')),
+            'validade_rntrc': safe_str(row.get('Validade Rntrc', ''))
+        }
+    return {}
+
+def buscar_serial(chassi, df_veic_antt):
+    """
+    Busca o número de série (chassi) de um veículo.
+    """
+    if not chassi:
+        return ''
+    mask = df_veic_antt['Nr Chassis'].apply(lambda x: limpar_cpf_cnpj(x) == limpar_cpf_cnpj(chassi))
+    if mask.any():
+        return safe_str(df_veic_antt[mask].iloc[0].get('Nr Chassis', ''))
+    return ''
 
 # ============================================================
 # INTERFACE PRINCIPAL
@@ -334,19 +418,24 @@ else:
     st.success("✅ Todos os arquivos encontrados na pasta `dados/`!")
 
 # --- Carregar dados ---
-df_fornecedores = carregar_excel(ARQUIVOS["fornecedores"], header=4)
-df_veiculos_antt = carregar_excel(ARQUIVOS["veiculos_antt"], header=4)
-df_condutores = carregar_excel(ARQUIVOS["condutores"], header=4)
-df_veiculos_compl = carregar_excel(ARQUIVOS["veiculos_compl"], header=4)
+df_fornecedores = carregar_excel(ARQUIVOS["fornecedores"], skiprows=4)
+df_veiculos_antt = carregar_excel(ARQUIVOS["veiculos_antt"], skiprows=4)
+df_condutores = carregar_excel(ARQUIVOS["condutores"], skiprows=4)
+df_veiculos_compl = carregar_excel(ARQUIVOS["veiculos_compl"], skiprows=4)
 template_bytes = carregar_template(ARQUIVOS["template"])
 
 if any(df is None for df in [df_fornecedores, df_veiculos_antt, df_condutores, df_veiculos_compl]) or template_bytes is None:
-    st.error("❌ Erro ao carregar um ou mais arquivos.")
+    st.error("❌ Erro ao carregar um ou mais arquivos. Verifique a estrutura dos arquivos Excel.")
     st.stop()
 
+# Limpeza básica
 for df in [df_fornecedores, df_veiculos_antt, df_condutores, df_veiculos_compl]:
     df.dropna(how='all', inplace=True)
     df.columns = df.columns.str.strip()
+
+# Debug: mostrar colunas para verificação (pode ser removido depois)
+# st.write("Colunas de fornecedores:", df_fornecedores.columns.tolist())
+# st.write("Colunas de veículos ANTT:", df_veiculos_antt.columns.tolist())
 
 # ============================================================
 # ESTADO DA SESSÃO
@@ -496,9 +585,152 @@ if st.session_state.etapa == "confirmar_transportador":
                 st.rerun()
 
 # ============================================================
-# ETAPA 3: SELECIONAR VEÍCULOS (continua igual...)
+# ETAPA 3: SELECIONAR VEÍCULOS
 # ============================================================
-# ... (código da etapa 3, 4 e 5 permanece igual, apenas substitua o nome "proprietario" por "transportador" nas referências)
-# Como o código é grande, vou assumir que você mantém a etapa 3, 4 e 5 do script anterior,
-# apenas trocando "proprietario" por "transportador" nas variáveis e exibições.
-# Caso precise, posso fornecer o script completo novamente, mas a lógica principal já está ajustada.
+if st.session_state.etapa == "selecionar_veiculos":
+    st.header("🚗 3. Selecionar Veículos do Transportador")
+    st.write(f"Transportador: **{st.session_state.transportador['nome']}**")
+    
+    if st.session_state.todos_veiculos:
+        # Exibir lista com checkboxes
+        veiculos_opcoes = []
+        for v in st.session_state.todos_veiculos:
+            label = f"{v['placa']} - {v['marca']} {v['modelo']} ({v['ano']})"
+            if v['mot_nome']:
+                label += f" - Motorista: {v['mot_nome']}"
+            veiculos_opcoes.append(label)
+        
+        selecionados = st.multiselect(
+            "Selecione os veículos que farão parte do contrato:",
+            options=veiculos_opcoes,
+            default=veiculos_opcoes  # pré-seleciona todos
+        )
+        
+        # Mapear seleção para objetos
+        veiculos_selecionados = []
+        for i, label in enumerate(veiculos_opcoes):
+            if label in selecionados:
+                veiculos_selecionados.append(st.session_state.todos_veiculos[i])
+        
+        if st.button("✅ Confirmar veículos selecionados"):
+            st.session_state.veiculos_selecionados = veiculos_selecionados
+            st.session_state.etapa = "selecionar_motoristas"
+            st.rerun()
+    else:
+        st.warning("Nenhum veículo encontrado para este transportador.")
+        if st.button("🔙 Voltar e buscar novamente"):
+            st.session_state.etapa = "busca"
+            st.rerun()
+
+# ============================================================
+# ETAPA 4: SELECIONAR MOTORISTAS
+# ============================================================
+if st.session_state.etapa == "selecionar_motoristas":
+    st.header("👨‍✈️ 4. Selecionar Motoristas")
+    
+    # Coletar motoristas dos veículos selecionados
+    motoristas_dos_veiculos = obter_motoristas_dos_veiculos(
+        st.session_state.veiculos_selecionados, df_condutores, df_fornecedores
+    )
+    
+    # Opções adicionais da base
+    todos_condutores = obter_todos_condutores_da_base(df_condutores)
+    
+    # Criar lista de opções combinando motoristas dos veículos e todos os condutores
+    opcoes_motoristas = {}
+    for m in motoristas_dos_veiculos:
+        opcoes_motoristas[m['cpf']] = m['nome']
+    for c in todos_condutores:
+        if c['cpf'] not in opcoes_motoristas:
+            opcoes_motoristas[c['cpf']] = c['nome']
+    
+    # Converter para lista para multiselect
+    lista_opcoes = [f"{cpf} - {nome}" for cpf, nome in opcoes_motoristas.items()]
+    
+    # Pré-selecionar os motoristas que já estão associados aos veículos selecionados
+    default_selecionados = [f"{m['cpf']} - {m['nome']}" for m in motoristas_dos_veiculos if m['cpf']]
+    
+    selecionados = st.multiselect(
+        "Selecione os motoristas que farão parte do contrato:",
+        options=lista_opcoes,
+        default=default_selecionados
+    )
+    
+    # Converter seleção para lista de dicionários
+    motoristas_selecionados = []
+    for item in selecionados:
+        cpf = item.split(' - ')[0]
+        nome = item.split(' - ')[1]
+        motoristas_selecionados.append({'cpf': cpf, 'nome': nome})
+    
+    if st.button("✅ Confirmar motoristas"):
+        st.session_state.motoristas_selecionados = motoristas_selecionados
+        st.session_state.etapa = "gerar_contrato"
+        st.rerun()
+
+# ============================================================
+# ETAPA 5: GERAR CONTRATO
+# ============================================================
+if st.session_state.etapa == "gerar_contrato":
+    st.header("📄 5. Gerar Contrato")
+    
+    transportador = st.session_state.transportador
+    veiculos = st.session_state.veiculos_selecionados
+    motoristas = st.session_state.motoristas_selecionados
+    
+    # Exibir resumo
+    st.subheader("Resumo do contrato")
+    st.write(f"**Transportador:** {transportador['nome']}")
+    st.write(f"**CNPJ/CPF:** {formatar_cpf_cnpj(transportador['cpf_cnpj'])}")
+    st.write(f"**Endereço:** {transportador['endereco']}, {transportador['bairro']}, {transportador['cidade']}/{transportador['uf']}")
+    st.write(f"**Veículos selecionados:** {len(veiculos)}")
+    for v in veiculos:
+        st.write(f"- {v['placa']} - {v['marca']} {v['modelo']}")
+    st.write(f"**Motoristas selecionados:** {len(motoristas)}")
+    for m in motoristas:
+        st.write(f"- {m['nome']} (CPF: {formatar_cpf(m['cpf'])})")
+    
+    # Botão para gerar
+    if st.button("🚀 Gerar Contrato"):
+        # Preparar dados para o template
+        # (Aqui você deve mapear os campos do template conforme necessário)
+        # Exemplo simples:
+        context = {
+            'transportador_nome': transportador['nome'],
+            'transportador_cpf_cnpj': formatar_cpf_cnpj(transportador['cpf_cnpj']),
+            'transportador_endereco': transportador['endereco'],
+            'transportador_bairro': transportador['bairro'],
+            'transportador_cidade': transportador['cidade'],
+            'transportador_uf': transportador['uf'],
+            'transportador_rntrc': transportador.get('rntrc', ''),
+            'data_dia': datetime.now().day,
+            'data_mes': meses[datetime.now().month],
+            'data_ano': datetime.now().year,
+            # Adicionar listas de veículos e motoristas conforme necessário
+        }
+        
+        # Carregar template e gerar documento
+        try:
+            template = DocxTemplate(io.BytesIO(template_bytes))
+            template.render(context)
+            # Salvar em memória
+            output = io.BytesIO()
+            template.save(output)
+            output.seek(0)
+            
+            st.success("✅ Contrato gerado com sucesso!")
+            st.download_button(
+                label="📥 Baixar Contrato",
+                data=output,
+                file_name=f"contrato_{transportador['nome']}_{datetime.now().strftime('%Y%m%d')}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+        except Exception as e:
+            st.error(f"Erro ao gerar contrato: {e}")
+    
+    if st.button("🔙 Voltar ao início"):
+        # Resetar estado
+        for key in ['etapa', 'veiculo_escolhido', 'transportador', 'todos_veiculos', 'veiculos_selecionados', 'motoristas_selecionados']:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
