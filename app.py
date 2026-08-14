@@ -11,36 +11,48 @@ st.set_page_config(page_title="Gerador de Contratos", layout="wide")
 st.title("🚛 Gerador de Contratos de Transporte")
 
 # ============================================================
-# CONFIGURAÇÃO DOS ARQUIVOS PADRÃO (no repositório)
+# CONFIGURAÇÃO DOS ARQUIVOS (pasta dados/)
 # ============================================================
-# Defina os caminhos dos arquivos fixos que estarão no repositório.
-# Eles serão carregados automaticamente se existirem.
-ARQUIVOS_PADRAO = {
-    "fornecedores": "fornecedores_20260417_2_53XLS.xlsx",
-    "veiculos_antt": "Veiculos_20260417_3_15XLS.xlsx",
-    "condutores": "condutores.xlsx",
-    "veiculos_compl": "veiculos.xlsx",
-    "template": "template_contrato.docx"
+PASTA_DADOS = "dados"
+ARQUIVOS = {
+    "fornecedores": os.path.join(PASTA_DADOS, "fornecedores.xlsx"),
+    "veiculos_antt": os.path.join(PASTA_DADOS, "veiculos_antt.xlsx"),
+    "condutores": os.path.join(PASTA_DADOS, "condutores.xlsx"),
+    "veiculos_compl": os.path.join(PASTA_DADOS, "veiculos_complementares.xlsx"),
+    "template": os.path.join(PASTA_DADOS, "template_contrato.docx"),
 }
 
-# Verifica se os arquivos padrão existem no sistema
-def arquivo_existe(caminho):
-    return os.path.exists(caminho)
-
 # ============================================================
-# FUNÇÕES AUXILIARES (com cache para dados)
+# FUNÇÕES DE CARREGAMENTO (com cache)
 # ============================================================
+@st.cache_data
+def carregar_excel(caminho, header=4):
+    """Carrega um arquivo Excel com cache."""
+    try:
+        return pd.read_excel(caminho, dtype=str, engine='openpyxl', header=header)
+    except Exception as e:
+        return None
 
 @st.cache_data
-def carregar_excel_bytes(bytes_arquivo, header):
-    """Carrega um arquivo Excel a partir de bytes com cache."""
-    return pd.read_excel(io.BytesIO(bytes_arquivo), dtype=str, engine='openpyxl', header=header)
+def carregar_template(caminho):
+    """Carrega o template .docx como bytes."""
+    try:
+        with open(caminho, "rb") as f:
+            return f.read()
+    except Exception as e:
+        return None
 
-@st.cache_data
-def carregar_excel_arquivo(caminho, header):
-    """Carrega um arquivo Excel diretamente do sistema de arquivos com cache."""
-    return pd.read_excel(caminho, dtype=str, engine='openpyxl', header=header)
+def verificar_arquivos():
+    """Verifica se todos os arquivos existem na pasta dados/."""
+    faltantes = []
+    for nome, caminho in ARQUIVOS.items():
+        if not os.path.exists(caminho):
+            faltantes.append(nome)
+    return faltantes
 
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
 def limpar_cpf_cnpj(val):
     if pd.isna(val): return ''
     return ''.join(filter(str.isdigit, str(val)))
@@ -80,6 +92,7 @@ meses = {1:'janeiro',2:'fevereiro',3:'março',4:'abril',5:'maio',6:'junho',
          7:'julho',8:'agosto',9:'setembro',10:'outubro',11:'novembro',12:'dezembro'}
 
 def formatar_data_cadastro(data_str):
+    """Formata data de forma robusta."""
     if pd.isna(data_str) or not str(data_str).strip():
         hoje = datetime.now()
         return str(hoje.day), meses[hoje.month], str(hoje.year)
@@ -117,6 +130,7 @@ def extrair_endereco_pj(texto_endereco):
         if match_num:
             numero = match_num.group(1)
     rua = texto.strip()
+    # Remover prefixos para evitar duplicação "Rua RUA"
     prefixos = ['RUA ', 'R. ', 'AVENIDA ', 'AV. ', 'ALAMEDA ', 'TRAVESSA ', 'TRAV. ']
     for prefixo in prefixos:
         if rua.upper().startswith(prefixo):
@@ -344,114 +358,32 @@ def buscar_serial(veiculos_selecionados):
     return ''
 
 # ============================================================
-# CARREGAMENTO DOS DADOS (PADRÃO + FALLBACK UPLOAD)
+# INTERFACE PRINCIPAL
 # ============================================================
 
-def carregar_dados_padrao():
-    """Tenta carregar os arquivos padrão do repositório."""
-    dados = {}
-    for nome, caminho in ARQUIVOS_PADRAO.items():
-        if arquivo_existe(caminho):
-            if nome == "template":
-                with open(caminho, "rb") as f:
-                    dados[nome] = f.read()
-            else:
-                try:
-                    dados[nome] = carregar_excel_arquivo(caminho, 4)
-                except Exception as e:
-                    st.warning(f"Erro ao carregar {nome}: {e}")
-                    dados[nome] = None
-        else:
-            dados[nome] = None
-    return dados
+# --- Verificar se os arquivos existem na pasta dados/ ---
+faltantes = verificar_arquivos()
 
-# Tentar carregar dados padrão
-dados_padrao = carregar_dados_padrao()
-dados_padrao_ok = all(v is not None for v in dados_padrao.values())
-
-# ============================================================
-# INTERFACE: SIDEBAR COM UPLOAD OPCIONAL
-# ============================================================
-st.sidebar.header("📂 Dados")
-
-# Exibir status dos arquivos padrão
-if dados_padrao_ok:
-    st.sidebar.success("✅ Arquivos padrão carregados do repositório")
+if faltantes:
+    st.warning(f"⚠️ Arquivos não encontrados na pasta `dados/`: {', '.join(faltantes)}")
+    st.info("📂 Você pode fazer upload manualmente na barra lateral ou garantir que os arquivos estejam na pasta `dados/`.")
+    st.stop()
 else:
-    st.sidebar.warning("⚠️ Arquivos padrão não encontrados. Use o upload manual.")
+    st.success("✅ Todos os arquivos encontrados na pasta `dados/`!")
 
-# Upload opcional (para substituir os arquivos padrão)
-st.sidebar.subheader("Ou faça upload manual")
-fornecedores_file = st.sidebar.file_uploader("Fornecedores", type="xlsx", key="upload_forn")
-veiculos_antt_file = st.sidebar.file_uploader("Veículos ANTT", type="xlsx", key="upload_veic")
-condutores_file = st.sidebar.file_uploader("Condutores", type="xlsx", key="upload_cond")
-veiculos_compl_file = st.sidebar.file_uploader("Veículos Complementares", type="xlsx", key="upload_comp")
-template_file = st.sidebar.file_uploader("Template do Contrato (DOCX)", type="docx", key="upload_temp")
+# --- Carregar os arquivos (com cache) ---
+df_fornecedores = carregar_excel(ARQUIVOS["fornecedores"], header=4)
+df_veiculos_antt = carregar_excel(ARQUIVOS["veiculos_antt"], header=4)
+df_condutores = carregar_excel(ARQUIVOS["condutores"], header=4)
+df_veiculos_compl = carregar_excel(ARQUIVOS["veiculos_compl"], header=4)
+template_bytes = carregar_template(ARQUIVOS["template"])
 
-# Botão para carregar dados (apenas se os arquivos padrão não estiverem disponíveis)
-carregar = st.sidebar.button("📥 Carregar Dados", type="primary")
-
-# Lógica de carregamento: prioriza upload manual, senão usa padrão
-if carregar:
-    # Verifica se há uploads
-    if fornecedores_file and veiculos_antt_file and condutores_file and veiculos_compl_file and template_file:
-        # Carregar via upload
-        try:
-            st.session_state.df_fornecedores = carregar_excel_bytes(fornecedores_file.read(), 4)
-            st.session_state.df_veiculos_antt = carregar_excel_bytes(veiculos_antt_file.read(), 4)
-            st.session_state.df_condutores = carregar_excel_bytes(condutores_file.read(), 4)
-            st.session_state.df_veiculos_compl = carregar_excel_bytes(veiculos_compl_file.read(), 4)
-            st.session_state.template_bytes = template_file.read()
-            st.session_state.dados_carregados = True
-            st.session_state.modo_carregamento = "upload"
-            st.sidebar.success("✅ Dados carregados via upload!")
-        except Exception as e:
-            st.sidebar.error(f"❌ Erro ao carregar: {e}")
-            st.stop()
-    elif dados_padrao_ok:
-        # Carregar via arquivos padrão
-        st.session_state.df_fornecedores = dados_padrao["fornecedores"]
-        st.session_state.df_veiculos_antt = dados_padrao["veiculos_antt"]
-        st.session_state.df_condutores = dados_padrao["condutores"]
-        st.session_state.df_veiculos_compl = dados_padrao["veiculos_compl"]
-        st.session_state.template_bytes = dados_padrao["template"]
-        st.session_state.dados_carregados = True
-        st.session_state.modo_carregamento = "padrao"
-        st.sidebar.success("✅ Dados carregados do repositório!")
-    else:
-        st.sidebar.error("❌ Nenhum dado disponível. Faça upload dos arquivos ou verifique os arquivos padrão.")
-        st.stop()
-else:
-    # Se os dados já estão carregados na sessão, mantém
-    if "dados_carregados" in st.session_state and st.session_state.dados_carregados:
-        pass
-    else:
-        # Se dados padrão existem, carrega automaticamente
-        if dados_padrao_ok:
-            st.session_state.df_fornecedores = dados_padrao["fornecedores"]
-            st.session_state.df_veiculos_antt = dados_padrao["veiculos_antt"]
-            st.session_state.df_condutores = dados_padrao["condutores"]
-            st.session_state.df_veiculos_compl = dados_padrao["veiculos_compl"]
-            st.session_state.template_bytes = dados_padrao["template"]
-            st.session_state.dados_carregados = True
-            st.session_state.modo_carregamento = "padrao"
-            st.sidebar.success("✅ Dados carregados automaticamente do repositório!")
-        else:
-            st.info("📂 Envie os arquivos na barra lateral e clique em 'Carregar Dados'.")
-            st.stop()
-
-# Se os dados estão carregados, prosseguir
-if "df_fornecedores" not in st.session_state:
-    st.info("📂 Envie os arquivos na barra lateral e clique em 'Carregar Dados'.")
+# Verificar se todos carregaram corretamente
+if any(df is None for df in [df_fornecedores, df_veiculos_antt, df_condutores, df_veiculos_compl]) or template_bytes is None:
+    st.error("❌ Erro ao carregar um ou mais arquivos. Verifique o formato e o cabeçalho (header=4).")
     st.stop()
 
-df_fornecedores = st.session_state.df_fornecedores
-df_veiculos_antt = st.session_state.df_veiculos_antt
-df_condutores = st.session_state.df_condutores
-df_veiculos_compl = st.session_state.df_veiculos_compl
-template_bytes = st.session_state.template_bytes
-
-# Limpeza inicial (já feita no cache, mas garantimos)
+# Limpeza inicial
 for df in [df_fornecedores, df_veiculos_antt, df_condutores, df_veiculos_compl]:
     df.dropna(how='all', inplace=True)
     df.columns = df.columns.str.strip()
@@ -601,7 +533,7 @@ if st.session_state.etapa == "selecionar_veiculos":
     else:
         st.warning("Nenhum veículo disponível.")
 
-    # Adicionar veículo extra da base completa
+    # Expandir para adicionar veículo extra da base completa
     with st.expander("➕ Adicionar veículo extra da base completa"):
         modo_busca = st.radio("Como buscar?", ["Por placa", "Listar todos (filtrar)"], key="modo_busca_veic")
         if modo_busca == "Por placa":
@@ -728,10 +660,12 @@ if st.session_state.etapa == "gerar_contrato":
         st.error("Dados incompletos. Volte e preencha todas as etapas.")
         st.stop()
 
+    # --- DADOS COMPLEMENTARES ---
     st.subheader("📝 Dados Complementares")
 
     col1, col2 = st.columns(2)
     with col1:
+        # ANTT
         antt = buscar_antt(proprietario, veiculos_selecionados, df_veiculos_antt, df_veiculos_compl)
         if not antt:
             antt = st.text_input("ANTT/RNTRC (não encontrado automaticamente):", value="", key="antt_manual")
@@ -741,15 +675,18 @@ if st.session_state.etapa == "gerar_contrato":
         else:
             st.write(f"✅ ANTT/RNTRC encontrado: {antt}")
 
+        # Serial
         serial = buscar_serial(veiculos_selecionados)
         if not serial:
             serial = st.text_input("Serial do rastreador:", value="A DEFINIR", key="serial_manual")
         else:
             st.write(f"✅ Serial encontrado: {serial}")
 
+        # Valor
         valor = st.text_input("Valor por entrega (R$):", value="X (a definir)", key="valor")
 
     with col2:
+        # CEP (se for PJ)
         is_pf = len(limpar_cpf_cnpj(proprietario['cpf_cnpj'])) == 11
         if not is_pf:
             cidade = proprietario.get('cidade', '')
@@ -767,6 +704,7 @@ if st.session_state.etapa == "gerar_contrato":
         else:
             st.write("🔹 Pessoa Física – CEP será buscado do endereço.")
 
+    # --- CAMPOS ADICIONAIS PARA PF ---
     if is_pf:
         st.subheader("👤 Dados da Pessoa Física (Proprietário)")
         col3, col4 = st.columns(2)
@@ -784,6 +722,7 @@ if st.session_state.etapa == "gerar_contrato":
         rg_prop = ""
         estado_civil = ""
 
+    # --- BOTÃO GERAR ---
     if st.button("🚀 Gerar Contrato"):
         cpf_cnpj_limpo = limpar_cpf_cnpj(proprietario['cpf_cnpj'])
         is_pf = len(cpf_cnpj_limpo) == 11
@@ -880,6 +819,7 @@ if st.session_state.etapa == "gerar_contrato":
                 'cep_pj_1': cep_final,
             })
 
+        # Gerar documento
         try:
             doc = DocxTemplate(io.BytesIO(template_bytes))
             doc.render(contexto)
@@ -900,6 +840,6 @@ if st.session_state.etapa == "gerar_contrato":
 
     if st.button("🔄 Novo contrato"):
         for key in list(st.session_state.keys()):
-            if key not in ["df_fornecedores", "df_veiculos_antt", "df_condutores", "df_veiculos_compl", "template_bytes", "dados_carregados", "modo_carregamento"]:
+            if key not in ["df_fornecedores", "df_veiculos_antt", "df_condutores", "df_veiculos_compl", "template_bytes"]:
                 del st.session_state[key]
         st.rerun()
