@@ -6,6 +6,7 @@ import re
 import requests
 from datetime import datetime
 import os
+import unicodedata
 
 st.set_page_config(page_title="Gerador de Contratos", layout="wide")
 st.title("🚛 Gerador de Contratos de Transporte")
@@ -115,7 +116,14 @@ def safe_str(val):
 
 def normalizar_nome(nome):
     if pd.isna(nome): return ''
-    return ' '.join(str(nome).upper().split())
+    # Remove acentos e caracteres especiais
+    nome = unicodedata.normalize('NFKD', str(nome)).encode('ASCII', 'ignore').decode('ASCII')
+    # Converte para maiúsculas e remove espaços extras
+    return ' '.join(nome.upper().split())
+
+def remover_acentos(texto):
+    if pd.isna(texto): return ''
+    return unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('ASCII').upper()
 
 meses = {1:'janeiro',2:'fevereiro',3:'março',4:'abril',5:'maio',6:'junho',
          7:'julho',8:'agosto',9:'setembro',10:'outubro',11:'novembro',12:'dezembro'}
@@ -211,23 +219,63 @@ COLUNAS_MOTORISTA = ['Motorista Cnpj', 'Motorista CPF', 'Condutor CPF', 'Motoris
 def buscar_veiculos_por_transportador(df_veic_antt, df_forn, termo):
     """
     Busca veículos cujo proprietário (campo 'Proprietário Cnpj') corresponda a um fornecedor
-    cujo nome contenha o termo buscado.
+    cujo nome contenha o termo buscado (ou CPF/CNPJ se for numérico).
+    Retorna: (lista_veiculos, lista_fornecedores_encontrados)
     """
     if not termo:
-        return []
-    termo_norm = normalizar_nome(termo)
-    # Filtrar fornecedores pelo nome
-    mask_forn = df_forn['Nome Fornecedor'].apply(normalizar_nome).str.contains(termo_norm, na=False, case=False)
-    fornecedores_filtrados = df_forn[mask_forn]
+        return [], []
+
+    termo_original = termo.strip()
+    termo_limpo = remover_acentos(termo_original)
+    termo_norm = normalizar_nome(termo_original)
+
+    # Extrair números do termo para verificar se é CPF/CNPJ
+    apenas_numeros = ''.join(filter(str.isdigit, termo_original))
+    
+    # 1. Se o termo parece um CPF/CNPJ (11 ou 14 dígitos), buscar diretamente
+    if len(apenas_numeros) == 11 or len(apenas_numeros) == 14:
+        fornecedores_filtrados = df_forn[df_forn['Cnpj/Cpf'].apply(limpar_cpf_cnpj) == apenas_numeros]
+        if not fornecedores_filtrados.empty:
+            veiculos = _veiculos_por_fornecedores(df_veic_antt, df_forn, fornecedores_filtrados)
+            return veiculos, fornecedores_filtrados.to_dict('records')
+
+    # 2. Buscar por nome (várias estratégias)
+    # Preparar colunas normalizadas
+    df_forn['nome_norm'] = df_forn['Nome Fornecedor'].apply(normalizar_nome)
+    df_forn['nome_sem_acento'] = df_forn['Nome Fornecedor'].apply(remover_acentos)
+    
+    # Estratégia 1: contém o termo normalizado
+    mask = df_forn['nome_norm'].str.contains(termo_norm, na=False, case=False)
+    fornecedores_filtrados = df_forn[mask].copy()
+    
+    # Estratégia 2: contém o termo sem acentos (se a primeira falhou)
     if fornecedores_filtrados.empty:
-        return []
-    # Obter CPF/CNPJ dos fornecedores filtrados
+        mask2 = df_forn['nome_sem_acento'].str.contains(termo_limpo, na=False, case=False)
+        fornecedores_filtrados = df_forn[mask2].copy()
+    
+    # Estratégia 3: contém o termo original (case-insensitive)
+    if fornecedores_filtrados.empty:
+        mask3 = df_forn['Nome Fornecedor'].str.contains(termo_original, na=False, case=False)
+        fornecedores_filtrados = df_forn[mask3].copy()
+    
+    # Se encontrou algum fornecedor, buscar veículos
+    if not fornecedores_filtrados.empty:
+        veiculos = _veiculos_por_fornecedores(df_veic_antt, df_forn, fornecedores_filtrados)
+        return veiculos, fornecedores_filtrados.to_dict('records')
+    
+    # Nenhum fornecedor encontrado
+    return [], []
+
+def _veiculos_por_fornecedores(df_veic_antt, df_forn, fornecedores_filtrados):
+    """
+    Dado um DataFrame de fornecedores filtrados, retorna a lista de veículos associados.
+    """
     cpfs_cnpjs = set()
     for _, row in fornecedores_filtrados.iterrows():
         cpf_cnpj = limpar_cpf_cnpj(row['Cnpj/Cpf'])
         if cpf_cnpj:
             cpfs_cnpjs.add(cpf_cnpj)
-    # Filtrar veículos que tenham 'Proprietário Cnpj' igual a algum dos CPF/CNPJ
+    
     veiculos = []
     for _, row in df_veic_antt.iterrows():
         prop_cnpj = limpar_cpf_cnpj(row.get('Proprietário Cnpj', ''))
@@ -345,9 +393,6 @@ def obter_veiculos_do_transportador(cnpj_prop, df_veic_antt, df_veic_compl, df_c
     return veiculos
 
 def obter_motoristas_dos_veiculos(veiculos, df_cond, df_forn):
-    """
-    Para uma lista de veículos, retorna uma lista de motoristas (CPF, Nome) únicos.
-    """
     motoristas = {}
     for v in veiculos:
         cpf = v.get('mot_cpf', '')
@@ -355,7 +400,6 @@ def obter_motoristas_dos_veiculos(veiculos, df_cond, df_forn):
             if cpf not in motoristas:
                 nome = v.get('mot_nome', '')
                 if not nome:
-                    # Buscar nos dataframes
                     m = df_cond[df_cond['CPF N°'].apply(limpar_cpf_cnpj) == cpf]
                     if not m.empty:
                         nome = safe_str(m.iloc[0]['Nome'])
@@ -367,9 +411,6 @@ def obter_motoristas_dos_veiculos(veiculos, df_cond, df_forn):
     return [{'cpf': cpf, 'nome': nome} for cpf, nome in motoristas.items()]
 
 def obter_todos_condutores_da_base(df_cond):
-    """
-    Retorna todos os condutores da base para seleção manual.
-    """
     condutores = []
     for _, row in df_cond.iterrows():
         cpf = limpar_cpf_cnpj(row.get('CPF N°', ''))
@@ -379,9 +420,6 @@ def obter_todos_condutores_da_base(df_cond):
     return condutores
 
 def buscar_antt(placa, df_veic_antt):
-    """
-    Busca dados ANTT de um veículo pela placa.
-    """
     placa_limpa = limpar_placa(placa)
     mask = df_veic_antt['Placa'].apply(limpar_placa) == placa_limpa
     if mask.any():
@@ -394,9 +432,6 @@ def buscar_antt(placa, df_veic_antt):
     return {}
 
 def buscar_serial(chassi, df_veic_antt):
-    """
-    Busca o número de série (chassi) de um veículo.
-    """
     if not chassi:
         return ''
     mask = df_veic_antt['Nr Chassis'].apply(lambda x: limpar_cpf_cnpj(x) == limpar_cpf_cnpj(chassi))
@@ -433,10 +468,6 @@ for df in [df_fornecedores, df_veiculos_antt, df_condutores, df_veiculos_compl]:
     df.dropna(how='all', inplace=True)
     df.columns = df.columns.str.strip()
 
-# Debug: mostrar colunas para verificação (pode ser removido depois)
-# st.write("Colunas de fornecedores:", df_fornecedores.columns.tolist())
-# st.write("Colunas de veículos ANTT:", df_veiculos_antt.columns.tolist())
-
 # ============================================================
 # ESTADO DA SESSÃO
 # ============================================================
@@ -461,23 +492,24 @@ st.header("🔍 1. Buscar Veículo")
 col_busca1, col_busca2 = st.columns(2)
 
 with col_busca1:
-    modo_busca = st.radio("Buscar por:", ["Placa", "Nome do Transportador"], horizontal=True)
+    modo_busca = st.radio("Buscar por:", ["Placa", "Nome do Transportador (ou CPF/CNPJ)"], horizontal=True)
 
 with col_busca2:
     if modo_busca == "Placa":
         termo_busca = st.text_input("Digite a placa (ou parte):", key="placa_busca")
     else:
-        termo_busca = st.text_input("Digite o nome do transportador (ou parte):", key="nome_busca")
+        termo_busca = st.text_input("Digite o nome do transportador ou CPF/CNPJ:", key="nome_busca")
 
 resultados = []
+fornecedores_encontrados = []
 if termo_busca:
     if modo_busca == "Placa":
         resultados = buscar_veiculo_por_placa(df_veiculos_antt, termo_busca, df_fornecedores)
     else:
-        resultados = buscar_veiculos_por_transportador(df_veiculos_antt, df_fornecedores, termo_busca)
+        resultados, fornecedores_encontrados = buscar_veiculos_por_transportador(df_veiculos_antt, df_fornecedores, termo_busca)
 
 if resultados:
-    st.success(f"✅ {len(resultados)} veículo(s) encontrado(s).")
+    st.success(f"✅ {len(resultados)} veículo(s) encontrado(s) para o transportador.")
     
     # Exibir lista de veículos para seleção
     opcoes = []
@@ -493,7 +525,19 @@ if resultados:
         st.rerun()
 else:
     if termo_busca:
-        st.warning("Nenhum veículo encontrado.")
+        if modo_busca == "Nome do Transportador (ou CPF/CNPJ)":
+            if fornecedores_encontrados:
+                st.warning(f"Encontrados {len(fornecedores_encontrados)} fornecedor(es) com o termo, mas nenhum veículo associado. Verifique se os CNPJs/CPFs estão corretos.")
+                # Mostrar os fornecedores encontrados para debug
+                with st.expander("Fornecedores encontrados (clique para expandir)"):
+                    for f in fornecedores_encontrados:
+                        st.write(f"- {f.get('Nome Fornecedor', 'N/I')} | CNPJ/CPF: {formatar_cpf_cnpj(f.get('Cnpj/Cpf', ''))}")
+                st.info("💡 Dica: Confirme se o CNPJ/CPF do fornecedor está cadastrado como 'Proprietário Cnpj' na planilha de veículos.")
+            else:
+                st.warning("Nenhum fornecedor encontrado com esse termo.")
+                st.info("💡 Dica: Tente buscar pelo CPF/CNPJ (apenas números) ou digite parte do nome exato.")
+        else:
+            st.warning("Nenhum veículo encontrado para esta placa.")
 
 # ============================================================
 # ETAPA 2: CONFIRMAR TRANSPORTADOR (Fornecedor)
@@ -592,7 +636,6 @@ if st.session_state.etapa == "selecionar_veiculos":
     st.write(f"Transportador: **{st.session_state.transportador['nome']}**")
     
     if st.session_state.todos_veiculos:
-        # Exibir lista com checkboxes
         veiculos_opcoes = []
         for v in st.session_state.todos_veiculos:
             label = f"{v['placa']} - {v['marca']} {v['modelo']} ({v['ano']})"
@@ -603,10 +646,9 @@ if st.session_state.etapa == "selecionar_veiculos":
         selecionados = st.multiselect(
             "Selecione os veículos que farão parte do contrato:",
             options=veiculos_opcoes,
-            default=veiculos_opcoes  # pré-seleciona todos
+            default=veiculos_opcoes
         )
         
-        # Mapear seleção para objetos
         veiculos_selecionados = []
         for i, label in enumerate(veiculos_opcoes):
             if label in selecionados:
@@ -628,15 +670,12 @@ if st.session_state.etapa == "selecionar_veiculos":
 if st.session_state.etapa == "selecionar_motoristas":
     st.header("👨‍✈️ 4. Selecionar Motoristas")
     
-    # Coletar motoristas dos veículos selecionados
     motoristas_dos_veiculos = obter_motoristas_dos_veiculos(
         st.session_state.veiculos_selecionados, df_condutores, df_fornecedores
     )
     
-    # Opções adicionais da base
     todos_condutores = obter_todos_condutores_da_base(df_condutores)
     
-    # Criar lista de opções combinando motoristas dos veículos e todos os condutores
     opcoes_motoristas = {}
     for m in motoristas_dos_veiculos:
         opcoes_motoristas[m['cpf']] = m['nome']
@@ -644,10 +683,7 @@ if st.session_state.etapa == "selecionar_motoristas":
         if c['cpf'] not in opcoes_motoristas:
             opcoes_motoristas[c['cpf']] = c['nome']
     
-    # Converter para lista para multiselect
     lista_opcoes = [f"{cpf} - {nome}" for cpf, nome in opcoes_motoristas.items()]
-    
-    # Pré-selecionar os motoristas que já estão associados aos veículos selecionados
     default_selecionados = [f"{m['cpf']} - {m['nome']}" for m in motoristas_dos_veiculos if m['cpf']]
     
     selecionados = st.multiselect(
@@ -656,7 +692,6 @@ if st.session_state.etapa == "selecionar_motoristas":
         default=default_selecionados
     )
     
-    # Converter seleção para lista de dicionários
     motoristas_selecionados = []
     for item in selecionados:
         cpf = item.split(' - ')[0]
@@ -678,7 +713,6 @@ if st.session_state.etapa == "gerar_contrato":
     veiculos = st.session_state.veiculos_selecionados
     motoristas = st.session_state.motoristas_selecionados
     
-    # Exibir resumo
     st.subheader("Resumo do contrato")
     st.write(f"**Transportador:** {transportador['nome']}")
     st.write(f"**CNPJ/CPF:** {formatar_cpf_cnpj(transportador['cpf_cnpj'])}")
@@ -690,11 +724,7 @@ if st.session_state.etapa == "gerar_contrato":
     for m in motoristas:
         st.write(f"- {m['nome']} (CPF: {formatar_cpf(m['cpf'])})")
     
-    # Botão para gerar
     if st.button("🚀 Gerar Contrato"):
-        # Preparar dados para o template
-        # (Aqui você deve mapear os campos do template conforme necessário)
-        # Exemplo simples:
         context = {
             'transportador_nome': transportador['nome'],
             'transportador_cpf_cnpj': formatar_cpf_cnpj(transportador['cpf_cnpj']),
@@ -706,14 +736,11 @@ if st.session_state.etapa == "gerar_contrato":
             'data_dia': datetime.now().day,
             'data_mes': meses[datetime.now().month],
             'data_ano': datetime.now().year,
-            # Adicionar listas de veículos e motoristas conforme necessário
         }
         
-        # Carregar template e gerar documento
         try:
             template = DocxTemplate(io.BytesIO(template_bytes))
             template.render(context)
-            # Salvar em memória
             output = io.BytesIO()
             template.save(output)
             output.seek(0)
@@ -729,7 +756,6 @@ if st.session_state.etapa == "gerar_contrato":
             st.error(f"Erro ao gerar contrato: {e}")
     
     if st.button("🔙 Voltar ao início"):
-        # Resetar estado
         for key in ['etapa', 'veiculo_escolhido', 'transportador', 'todos_veiculos', 'veiculos_selecionados', 'motoristas_selecionados']:
             if key in st.session_state:
                 del st.session_state[key]
