@@ -5,23 +5,27 @@ import io
 import re
 import requests
 from datetime import datetime
+from functools import lru_cache
 
 st.set_page_config(page_title="Gerador de Contratos", layout="wide")
 st.title("🚛 Gerador de Contratos de Transporte")
 
 # ------------------------------------------------------------
-# FUNÇÕES AUXILIARES
+# FUNÇÕES AUXILIARES (com cache para agilizar)
 # ------------------------------------------------------------
+@lru_cache(maxsize=128)
 def limpar_cpf_cnpj(val):
     if pd.isna(val): return ''
     return ''.join(filter(str.isdigit, str(val)))
 
+@lru_cache(maxsize=128)
 def formatar_cpf(cpf):
     cpf = limpar_cpf_cnpj(cpf)
     if len(cpf) == 11:
         return f"{cpf[:3]}.{cpf[3:6]}.{cpf[6:9]}-{cpf[9:]}"
     return cpf
 
+@lru_cache(maxsize=128)
 def formatar_cnpj(cnpj):
     cnpj = limpar_cpf_cnpj(cnpj)
     if len(cnpj) == 14:
@@ -51,10 +55,25 @@ meses = {1:'janeiro',2:'fevereiro',3:'março',4:'abril',5:'maio',6:'junho',
          7:'julho',8:'agosto',9:'setembro',10:'outubro',11:'novembro',12:'dezembro'}
 
 def formatar_data_cadastro(data_str):
+    """Converte data com fallback robusto."""
     if pd.isna(data_str) or not str(data_str).strip():
         hoje = datetime.now()
         return str(hoje.day), meses[hoje.month], str(hoje.year)
     try:
+        data_str = str(data_str).strip()
+        # Tentar dd/mm/aaaa
+        if '/' in data_str:
+            partes = data_str.split('/')
+            if len(partes) == 3:
+                dt = datetime(int(partes[2]), int(partes[1]), int(partes[0]))
+                return str(dt.day), meses[dt.month], str(dt.year)
+        # Tentar aaaa-mm-dd
+        if '-' in data_str:
+            partes = data_str.split('-')
+            if len(partes) == 3 and len(partes[0]) == 4:
+                dt = datetime(int(partes[0]), int(partes[1]), int(partes[2]))
+                return str(dt.day), meses[dt.month], str(dt.year)
+        # Fallback para pandas
         dt = pd.to_datetime(data_str)
         return str(dt.day), meses[dt.month], str(dt.year)
     except:
@@ -62,6 +81,7 @@ def formatar_data_cadastro(data_str):
         return str(hoje.day), meses[hoje.month], str(hoje.year)
 
 def extrair_endereco_pj(texto_endereco):
+    """Separa rua, número e complemento, removendo prefixos comuns."""
     if pd.isna(texto_endereco) or not str(texto_endereco).strip():
         return '', '', ''
     texto = str(texto_endereco).strip()
@@ -77,7 +97,34 @@ def extrair_endereco_pj(texto_endereco):
         if match_num:
             numero = match_num.group(1)
     rua = texto.strip()
+    # Remover prefixos comuns
+    prefixos = ['RUA ', 'R. ', 'AVENIDA ', 'AV. ', 'ALAMEDA ', 'TRAVESSA ', 'TRAV. ', 'AV ', 'R ']
+    for prefixo in prefixos:
+        if rua.upper().startswith(prefixo):
+            rua = rua[len(prefixo):].strip()
+            break
     return rua, numero, complemento
+
+def buscar_cep_online(rua, cidade, uf):
+    """Busca CEP via ViaCEP (com timeout) e retorna ou string vazia."""
+    if not rua or not cidade or not uf:
+        return ''
+    termos = re.findall(r'\b[A-ZÀ-Ú]{3,}\b', rua.upper())
+    if not termos:
+        return ''
+    query = ' '.join(termos[:3])
+    url = f"https://viacep.com.br/ws/{uf}/{cidade}/{query}/json/"
+    try:
+        resp = requests.get(url, timeout=3)
+        if resp.status_code == 200:
+            dados = resp.json()
+            if isinstance(dados, list) and dados:
+                return dados[0].get('cep', '')
+            elif isinstance(dados, dict) and dados.get('cep'):
+                return dados['cep']
+    except Exception:
+        pass
+    return ''
 
 def buscar_rg_proprietario(cpf_prop, df_cond, df_forn):
     cpf_limpo = limpar_cpf_cnpj(cpf_prop)
@@ -97,28 +144,30 @@ def buscar_rg_proprietario(cpf_prop, df_cond, df_forn):
     return ''
 
 # ------------------------------------------------------------
-# FUNÇÕES DE NEGÓCIO
+# FUNÇÕES DE NEGÓCIO (otimizadas)
 # ------------------------------------------------------------
 COLUNAS_MOTORISTA = ['Motorista Cnpj', 'Motorista CPF', 'Condutor CPF', 'Motorista', 'CPF Motorista', 'Condutor']
 
 def buscar_veiculo_por_placa(df_veic_antt, termo, df_forn):
-    """Busca veículos por placa (parcial) e retorna lista de dicionários."""
     if not termo:
         return []
     mask = df_veic_antt['Placa'].str.upper().str.contains(termo.upper(), na=False)
     resultados = df_veic_antt[mask]
     veiculos = []
+    # Pré-cria um dicionário de CPF->nome para acelerar a busca
+    # Usando um cache local para evitar percorrer df_forn várias vezes
+    if not df_forn.empty:
+        cpf_to_name = {limpar_cpf_cnpj(row['Cnpj/Cpf']): safe_str(row['Nome Fornecedor']) 
+                       for _, row in df_forn.iterrows()}
+    else:
+        cpf_to_name = {}
     for _, row in resultados.iterrows():
         placa = safe_str(row['Placa'])
         marca = safe_str(row.get('Marca', ''))
         modelo = safe_str(row.get('Modelo', ''))
         ano = safe_str(row.get('Ano', ''))
         prop_cnpj = limpar_cpf_cnpj(row.get('Proprietário Cnpj', ''))
-        prop_nome = ''
-        if prop_cnpj:
-            p = df_forn[df_forn['Cnpj/Cpf'].apply(limpar_cpf_cnpj) == prop_cnpj]
-            if not p.empty:
-                prop_nome = safe_str(p.iloc[0]['Nome Fornecedor'])
+        prop_nome = cpf_to_name.get(prop_cnpj, '')
         veiculos.append({
             'placa': placa,
             'marca': marca,
@@ -136,6 +185,20 @@ def obter_veiculos_do_proprietario(cnpj_prop, df_veic_antt, df_veic_compl, df_co
         return []
     mask = df_veic_antt['Proprietário Cnpj'].apply(limpar_cpf_cnpj) == cnpj_limpo
     veiculos = []
+    # Pré-cria dicionários para acelerar buscas de motorista e fornecedor
+    if not df_cond.empty:
+        cpf_cond_to_nome = {limpar_cpf_cnpj(row['CPF N°']): safe_str(row.get('Nome', '')) for _, row in df_cond.iterrows()}
+        cpf_cond_to_cnh = {limpar_cpf_cnpj(row['CPF N°']): safe_str(row.get('CNH N°', '')) for _, row in df_cond.iterrows()}
+        cpf_cond_to_rg = {limpar_cpf_cnpj(row['CPF N°']): safe_str(row.get('RG N°', '')) for _, row in df_cond.iterrows()}
+    else:
+        cpf_cond_to_nome = {}
+        cpf_cond_to_cnh = {}
+        cpf_cond_to_rg = {}
+    if not df_forn.empty:
+        cpf_forn_to_nome = {limpar_cpf_cnpj(row['Cnpj/Cpf']): safe_str(row.get('Nome Fornecedor', '')) for _, row in df_forn.iterrows()}
+    else:
+        cpf_forn_to_nome = {}
+
     for _, row in df_veic_antt[mask].iterrows():
         placa = safe_str(row['Placa'])
         placa_limpa = limpar_placa(placa)
@@ -171,13 +234,7 @@ def obter_veiculos_do_proprietario(cnpj_prop, df_veic_antt, df_veic_compl, df_co
                                 break
         mot_nome = ''
         if mot_cpf:
-            m = df_cond[df_cond['CPF N°'].apply(limpar_cpf_cnpj) == mot_cpf]
-            if not m.empty:
-                mot_nome = safe_str(m.iloc[0]['Nome'])
-            else:
-                m2 = df_forn[df_forn['Cnpj/Cpf'].apply(limpar_cpf_cnpj) == mot_cpf]
-                if not m2.empty:
-                    mot_nome = safe_str(m2.iloc[0]['Nome Fornecedor'])
+            mot_nome = cpf_cond_to_nome.get(mot_cpf) or cpf_forn_to_nome.get(mot_cpf, '')
         veiculos.append({
             'placa': placa,
             'marca': marca,
@@ -193,6 +250,23 @@ def obter_veiculos_do_proprietario(cnpj_prop, df_veic_antt, df_veic_compl, df_co
 def obter_motoristas_dos_veiculos(veiculos, df_condutores, df_fornecedores):
     cpfs_vistos = set()
     motoristas = []
+    # Pré-cria dicionários
+    if not df_condutores.empty:
+        cpf_cond_to_data = {
+            limpar_cpf_cnpj(row['CPF N°']): {
+                'nome': safe_str(row.get('Nome', '')),
+                'cnh': safe_str(row.get('CNH N°', '')),
+                'rg': safe_str(row.get('RG N°', ''))
+            }
+            for _, row in df_condutores.iterrows()
+        }
+    else:
+        cpf_cond_to_data = {}
+    if not df_fornecedores.empty:
+        cpf_forn_to_nome = {limpar_cpf_cnpj(row['Cnpj/Cpf']): safe_str(row.get('Nome Fornecedor', '')) for _, row in df_fornecedores.iterrows()}
+    else:
+        cpf_forn_to_nome = {}
+
     for v in veiculos:
         cpf = v.get('mot_cpf')
         if cpf and cpf not in cpfs_vistos:
@@ -200,17 +274,15 @@ def obter_motoristas_dos_veiculos(veiculos, df_condutores, df_fornecedores):
             nome = v.get('mot_nome', '')
             cnh = ''
             rg = ''
-            if nome:
-                m = df_condutores[df_condutores['CPF N°'].apply(limpar_cpf_cnpj) == cpf]
-                if not m.empty:
-                    row = m.iloc[0]
-                    nome = safe_str(row.get('Nome', '')) or nome
-                    cnh = safe_str(row.get('CNH N°', ''))
-                    rg = safe_str(row.get('RG N°', ''))
-                else:
-                    m2 = df_fornecedores[df_fornecedores['Cnpj/Cpf'].apply(limpar_cpf_cnpj) == cpf]
-                    if not m2.empty:
-                        nome = safe_str(m2.iloc[0].get('Nome Fornecedor', '')) or nome
+            if cpf in cpf_cond_to_data:
+                data = cpf_cond_to_data[cpf]
+                nome = data['nome'] or nome
+                cnh = data['cnh']
+                rg = data['rg']
+            else:
+                # Tenta no fornecedor PF
+                if cpf in cpf_forn_to_nome:
+                    nome = cpf_forn_to_nome[cpf] or nome
             motoristas.append({
                 'nome': nome,
                 'cpf': cpf,
@@ -293,12 +365,13 @@ if not (fornecedores_file and veiculos_antt_file and condutores_file and veiculo
     st.info("📂 Faça o upload de todos os arquivos necessários na barra lateral.")
     st.stop()
 
-# Ler e carregar os DataFrames
+# Ler e carregar DataFrames com otimização (engine='openpyxl' já é padrão)
 try:
-    df_fornecedores = pd.read_excel(fornecedores_file, dtype=str, engine='openpyxl', header=4)
-    df_veiculos_antt = pd.read_excel(veiculos_antt_file, dtype=str, engine='openpyxl', header=4)
-    df_condutores = pd.read_excel(condutores_file, dtype=str, engine='openpyxl', header=4)
-    df_veiculos_compl = pd.read_excel(veiculos_compl_file, dtype=str, engine='openpyxl', header=4)
+    with st.spinner("Carregando planilhas..."):
+        df_fornecedores = pd.read_excel(fornecedores_file, dtype=str, engine='openpyxl', header=4)
+        df_veiculos_antt = pd.read_excel(veiculos_antt_file, dtype=str, engine='openpyxl', header=4)
+        df_condutores = pd.read_excel(condutores_file, dtype=str, engine='openpyxl', header=4)
+        df_veiculos_compl = pd.read_excel(veiculos_compl_file, dtype=str, engine='openpyxl', header=4)
 except Exception as e:
     st.error(f"❌ Erro ao ler planilhas: {e}")
     st.stop()
@@ -308,7 +381,7 @@ for df in [df_fornecedores, df_veiculos_antt, df_condutores, df_veiculos_compl]:
     df.columns = df.columns.str.strip()
 
 # ============================================================
-# INÍCIO DO FLUXO PRINCIPAL (com estado da sessão)
+# FLUXO PRINCIPAL (com estado da sessão)
 # ============================================================
 if "etapa" not in st.session_state:
     st.session_state.etapa = "busca_veiculo"
@@ -330,7 +403,8 @@ st.header("🔍 1. Buscar Veículo")
 
 placa_busca = st.text_input("Digite a placa (ou parte):", key="placa_busca")
 if placa_busca:
-    resultados = buscar_veiculo_por_placa(df_veiculos_antt, placa_busca, df_fornecedores)
+    with st.spinner("Buscando veículos..."):
+        resultados = buscar_veiculo_por_placa(df_veiculos_antt, placa_busca, df_fornecedores)
     if resultados:
         opcoes = []
         for v in resultados:
@@ -376,9 +450,10 @@ if st.session_state.etapa == "confirmar_proprietario":
         if st.button("✅ Confirmar Proprietário"):
             st.session_state.proprietario = proprietario
             st.session_state.etapa = "selecionar_veiculos"
-            st.session_state.todos_veiculos = obter_veiculos_do_proprietario(
-                cnpj_prop, df_veiculos_antt, df_veiculos_compl, df_condutores, df_fornecedores
-            )
+            with st.spinner("Carregando veículos do proprietário..."):
+                st.session_state.todos_veiculos = obter_veiculos_do_proprietario(
+                    cnpj_prop, df_veiculos_antt, df_veiculos_compl, df_condutores, df_fornecedores
+                )
             if not st.session_state.todos_veiculos:
                 st.session_state.todos_veiculos = [{
                     'placa': veic['placa'],
@@ -416,9 +491,10 @@ if st.session_state.etapa == "confirmar_proprietario":
                 st.session_state.etapa = "selecionar_veiculos"
                 cnpj_limpo = limpar_cpf_cnpj(cpf)
                 if cnpj_limpo:
-                    st.session_state.todos_veiculos = obter_veiculos_do_proprietario(
-                        cnpj_limpo, df_veiculos_antt, df_veiculos_compl, df_condutores, df_fornecedores
-                    )
+                    with st.spinner("Carregando veículos..."):
+                        st.session_state.todos_veiculos = obter_veiculos_do_proprietario(
+                            cnpj_limpo, df_veiculos_antt, df_veiculos_compl, df_condutores, df_fornecedores
+                        )
                 if not st.session_state.todos_veiculos:
                     st.session_state.todos_veiculos = [{
                         'placa': veic['placa'],
@@ -455,7 +531,8 @@ if st.session_state.etapa == "selecionar_veiculos":
         if modo_busca == "Por placa":
             placa_extra = st.text_input("Digite a placa (ou parte):", key="placa_extra")
             if placa_extra:
-                extras = buscar_veiculo_por_placa(df_veiculos_antt, placa_extra, df_fornecedores)
+                with st.spinner("Buscando..."):
+                    extras = buscar_veiculo_por_placa(df_veiculos_antt, placa_extra, df_fornecedores)
                 if extras:
                     opcoes_extra = [f"{v['placa']} - {v['marca']} {v['modelo']} ({v['ano']})" for v in extras]
                     escolha_extra = st.selectbox("Selecione o veículo:", opcoes_extra, key="escolha_extra")
@@ -530,10 +607,11 @@ if st.session_state.etapa == "selecionar_veiculos":
 if st.session_state.etapa == "selecionar_motoristas":
     st.header("👤 4. Selecionar Motoristas")
 
-    motoristas_auto = obter_motoristas_dos_veiculos(st.session_state.todos_veiculos, df_condutores, df_fornecedores)
-    if not motoristas_auto:
-        st.info("Nenhum motorista vinculado. Buscando todos os condutores da base...")
-        motoristas_auto = obter_todos_condutores_da_base(df_condutores, df_fornecedores)
+    with st.spinner("Carregando motoristas..."):
+        motoristas_auto = obter_motoristas_dos_veiculos(st.session_state.todos_veiculos, df_condutores, df_fornecedores)
+        if not motoristas_auto:
+            st.info("Nenhum motorista vinculado. Buscando todos os condutores da base...")
+            motoristas_auto = obter_todos_condutores_da_base(df_condutores, df_fornecedores)
 
     if motoristas_auto:
         opcoes_mot = [f"{m['nome']} (CPF: {formatar_cpf(m['cpf'])})" for m in motoristas_auto]
@@ -574,6 +652,7 @@ if st.session_state.etapa == "gerar_contrato":
         st.error("Dados incompletos. Volte e preencha todas as etapas.")
         st.stop()
 
+    # ANTT
     antt = buscar_antt(proprietario, veiculos_selecionados, df_veiculos_antt, df_veiculos_compl)
     if not antt:
         antt = st.text_input("ANTT/RNTRC (não encontrado automaticamente):", value="", key="antt_manual")
@@ -581,10 +660,12 @@ if st.session_state.etapa == "gerar_contrato":
             st.warning("Digite o ANTT manualmente para continuar.")
             st.stop()
 
+    # Serial
     serial = buscar_serial(veiculos_selecionados)
     if not serial:
         serial = st.text_input("Serial do rastreador:", value="A DEFINIR", key="serial_manual")
 
+    # Valor
     valor = st.text_input("Valor por entrega (R$):", value="X (a definir)", key="valor")
 
     is_pf = len(limpar_cpf_cnpj(proprietario['cpf_cnpj'])) == 11
@@ -595,9 +676,25 @@ if st.session_state.etapa == "gerar_contrato":
             rg_prop = st.text_input("RG do proprietário:", value="")
         estado_civil = st.text_input("Estado civil:", value="")
     else:
-        numero_casa = ""
-        rg_prop = ""
-        estado_civil = ""
+        # Para PJ, vamos obter CEP
+        cidade = proprietario.get('cidade', '')
+        uf = proprietario.get('uf', '')
+        endereco_raw = proprietario.get('endereco', '')
+        rua, num, comp = extrair_endereco_pj(endereco_raw)
+        if not rua:
+            rua = endereco_raw
+        if not num:
+            num = 'S/N'
+        if not comp:
+            comp = proprietario.get('bairro', '')
+        cep = buscar_cep_online(rua, cidade, uf)
+        if not cep:
+            cep = st.text_input(f"CEP para {cidade}/{uf}:", value="", key="cep_manual")
+            if not cep:
+                cep = "00000-000"
+        numero_casa = num
+        rg_prop = ''
+        estado_civil = ''
 
     if st.button("🚀 Gerar Contrato"):
         cpf_cnpj_limpo = limpar_cpf_cnpj(proprietario['cpf_cnpj'])
@@ -669,11 +766,15 @@ if st.session_state.etapa == "gerar_contrato":
                 'cep_pj_1': '',
             })
         else:
+            # Usa rua, num, comp já extraídos acima
             rua, num, comp = extrair_endereco_pj(endereco_raw)
-            if not rua: rua = endereco_raw
-            if not num: num = 'S/N'
-            if not comp: comp = bairro
-            cep = "00000-000"
+            if not rua:
+                rua = endereco_raw
+            if not num:
+                num = 'S/N'
+            if not comp:
+                comp = bairro
+            # Já temos cep
             contexto.update({
                 'nome_contratado_pf': '',
                 'estado_civil': '',
@@ -691,20 +792,21 @@ if st.session_state.etapa == "gerar_contrato":
             })
 
         try:
-            doc = DocxTemplate(template_file)
-            doc.render(contexto)
-            buffer = io.BytesIO()
-            doc.save(buffer)
-            buffer.seek(0)
+            with st.spinner("Gerando contrato..."):
+                doc = DocxTemplate(template_file)
+                doc.render(contexto)
+                buffer = io.BytesIO()
+                doc.save(buffer)
+                buffer.seek(0)
 
-            nome_arquivo = f"CONTRATO_{proprietario['nome'].replace(' ', '_').upper()}_{veiculo_principal['placa']}.docx"
-            st.download_button(
-                label="📥 Baixar Contrato",
-                data=buffer,
-                file_name=nome_arquivo,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
-            st.success("✅ Contrato gerado com sucesso!")
+                nome_arquivo = f"CONTRATO_{proprietario['nome'].replace(' ', '_').upper()}_{veiculo_principal['placa']}.docx"
+                st.download_button(
+                    label="📥 Baixar Contrato",
+                    data=buffer,
+                    file_name=nome_arquivo,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
+                st.success("✅ Contrato gerado com sucesso!")
         except Exception as e:
             st.error(f"❌ Erro ao gerar contrato: {e}")
 
