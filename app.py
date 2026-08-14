@@ -11,25 +11,27 @@ st.set_page_config(page_title="Gerador de Contratos", layout="wide")
 st.title("🚛 Gerador de Contratos de Transporte")
 
 # ============================================================
-# CONFIGURAÇÃO DOS ARQUIVOS (pasta dados/)
+# CONFIGURAÇÃO DOS ARQUIVOS (mesmos nomes do script)
 # ============================================================
-PASTA_DADOS = "dados"
-ARQUIVOS = {
-    "fornecedores": os.path.join(PASTA_DADOS, "fornecedores.xlsx"),
-    "veiculos_antt": os.path.join(PASTA_DADOS, "veiculos_antt.xlsx"),
-    "condutores": os.path.join(PASTA_DADOS, "condutores.xlsx"),
-    "veiculos_compl": os.path.join(PASTA_DADOS, "veiculos_complementares.xlsx"),
-    "template": os.path.join(PASTA_DADOS, "template_contrato.docx"),
-}
+FORNECEDORES = 'fornecedores_20260417_2_53XLS.xlsx'
+VEICULOS_ANTT = 'Veiculos_20260417_3_15XLS.xlsx'
+CONDUTORES = 'condutores.xlsx'
+VEICULOS_COMPL = 'veiculos.xlsx'
+TEMPLATE = 'template_contrato.docx'
+PASTA_SAIDA = 'contratos_gerados'
+
+if not os.path.exists(PASTA_SAIDA):
+    os.makedirs(PASTA_SAIDA)
 
 # ============================================================
-# FUNÇÕES DE CARREGAMENTO (com cache)
+# FUNÇÕES DE CARREGAMENTO
 # ============================================================
 @st.cache_data
 def carregar_excel(caminho, header=4):
     try:
         return pd.read_excel(caminho, dtype=str, engine='openpyxl', header=header)
-    except Exception:
+    except Exception as e:
+        st.error(f"Erro ao carregar {caminho}: {e}")
         return None
 
 @st.cache_data
@@ -37,18 +39,19 @@ def carregar_template(caminho):
     try:
         with open(caminho, "rb") as f:
             return f.read()
-    except Exception:
+    except Exception as e:
+        st.error(f"Erro ao carregar template: {e}")
         return None
 
 def verificar_arquivos():
     faltantes = []
-    for nome, caminho in ARQUIVOS.items():
-        if not os.path.exists(caminho):
-            faltantes.append(nome)
+    for arquivo in [FORNECEDORES, VEICULOS_ANTT, CONDUTORES, VEICULOS_COMPL, TEMPLATE]:
+        if not os.path.exists(arquivo):
+            faltantes.append(arquivo)
     return faltantes
 
 # ============================================================
-# FUNÇÕES AUXILIARES
+# FUNÇÕES AUXILIARES (idênticas ao script)
 # ============================================================
 def limpar_cpf_cnpj(val):
     if pd.isna(val): return ''
@@ -93,17 +96,6 @@ def formatar_data_cadastro(data_str):
         hoje = datetime.now()
         return str(hoje.day), meses[hoje.month], str(hoje.year)
     try:
-        data_str = str(data_str).strip()
-        if '/' in data_str:
-            partes = data_str.split('/')
-            if len(partes) == 3:
-                dt = datetime(int(partes[2]), int(partes[1]), int(partes[0]))
-                return str(dt.day), meses[dt.month], str(dt.year)
-        if '-' in data_str:
-            partes = data_str.split('-')
-            if len(partes) == 3 and len(partes[0]) == 4:
-                dt = datetime(int(partes[0]), int(partes[1]), int(partes[2]))
-                return str(dt.day), meses[dt.month], str(dt.year)
         dt = pd.to_datetime(data_str)
         return str(dt.day), meses[dt.month], str(dt.year)
     except:
@@ -126,12 +118,6 @@ def extrair_endereco_pj(texto_endereco):
         if match_num:
             numero = match_num.group(1)
     rua = texto.strip()
-    # Remover prefixos para evitar duplicação "Rua RUA"
-    prefixos = ['RUA ', 'R. ', 'AVENIDA ', 'AV. ', 'ALAMEDA ', 'TRAVESSA ', 'TRAV. ']
-    for prefixo in prefixos:
-        if rua.upper().startswith(prefixo):
-            rua = rua[len(prefixo):].strip()
-            break
     return rua, numero, complemento
 
 def buscar_cep_online(rua, cidade, uf):
@@ -172,155 +158,88 @@ def buscar_rg_proprietario(cpf_prop, df_cond, df_forn):
     return ''
 
 # ============================================================
-# FUNÇÃO PARA IDENTIFICAR COLUNA DE RNTRC
-# ============================================================
-def get_rntrc_column(df):
-    """Retorna o nome da coluna de RNTRC em um DataFrame, ou None se não encontrar."""
-    possiveis = ['Rntrc', 'RNTRC', 'ANTT', 'ANTT/RNTRC', 'ANTT/RNTRC nº', 'Rntrc/ANTT']
-    for col in df.columns:
-        if col.strip().upper() in [p.upper() for p in possiveis]:
-            return col
-    return None
-
-# ============================================================
-# FUNÇÕES DE NEGÓCIO ATUALIZADAS (BUSCA PELO RNTRC, com fallback)
+# FUNÇÕES DE NEGÓCIO (baseadas no script)
 # ============================================================
 COLUNAS_MOTORISTA = ['Motorista Cnpj', 'Motorista CPF', 'Condutor CPF', 'Motorista', 'CPF Motorista', 'Condutor']
 
-def buscar_veiculos_por_nome_fallback(df_veic_antt, df_forn, termo):
-    """Fallback: busca veículos pelo nome do proprietário (coluna Proprietário Cnpj)."""
-    termo_norm = normalizar_nome(termo)
-    veiculos = []
-    for _, row in df_veic_antt.iterrows():
-        prop_cnpj = limpar_cpf_cnpj(row.get('Proprietário Cnpj', ''))
-        if prop_cnpj:
-            p = df_forn[df_forn['Cnpj/Cpf'].apply(limpar_cpf_cnpj) == prop_cnpj]
-            if not p.empty:
-                nome_forn = safe_str(p.iloc[0]['Nome Fornecedor'])
-                if termo_norm in normalizar_nome(nome_forn):
-                    veiculos.append({
-                        'placa': safe_str(row['Placa']),
-                        'marca': safe_str(row.get('Marca', '')),
-                        'modelo': safe_str(row.get('Modelo', '')),
-                        'ano': safe_str(row.get('Ano', '')),
-                        'rntrc': '',
-                        'prop_nome': nome_forn,
-                        'prop_cnpj': prop_cnpj,
-                        'row': row
-                    })
-    return veiculos
-
-def buscar_veiculos_por_nome(df_veic_antt, df_forn, termo):
-    """Busca veículos por parte do nome do transportador (fornecedor) e retorna com os dados do transportador (via RNTRC)."""
-    if not termo:
-        return []
-    termo_norm = normalizar_nome(termo)
-    # Filtrar fornecedores que contenham o termo no nome
-    mask_forn = df_forn['Nome Fornecedor'].apply(normalizar_nome).str.contains(termo_norm, na=False)
-    fornecedores_filtrados = df_forn[mask_forn]
-    if fornecedores_filtrados.empty:
-        return []
-    
-    col_rntrc_forn = get_rntrc_column(df_forn)
-    if col_rntrc_forn is None:
-        st.warning("⚠️ Coluna de RNTRC não encontrada em fornecedores. Usando busca pelo CNPJ/CPF do proprietário.")
-        return buscar_veiculos_por_nome_fallback(df_veic_antt, df_forn, termo)
-    
-    # Obter os RNTRCs desses fornecedores
-    rntrcs = set()
-    for _, row in fornecedores_filtrados.iterrows():
-        rntrc = safe_str(row.get(col_rntrc_forn, ''))
-        if rntrc:
-            rntrcs.add(limpar_cpf_cnpj(rntrc))
-    if not rntrcs:
-        return buscar_veiculos_por_nome_fallback(df_veic_antt, df_forn, termo)
-    
-    col_rntrc_veic = get_rntrc_column(df_veic_antt)
-    if col_rntrc_veic is None:
-        return buscar_veiculos_por_nome_fallback(df_veic_antt, df_forn, termo)
-    
-    veiculos = []
-    for _, row in df_veic_antt.iterrows():
-        rntrc_veic = safe_str(row.get(col_rntrc_veic, ''))
-        if limpar_cpf_cnpj(rntrc_veic) in rntrcs:
-            placa = safe_str(row['Placa'])
-            marca = safe_str(row.get('Marca', ''))
-            modelo = safe_str(row.get('Modelo', ''))
-            ano = safe_str(row.get('Ano', ''))
-            p = df_forn[df_forn[col_rntrc_forn].apply(limpar_cpf_cnpj) == limpar_cpf_cnpj(rntrc_veic)]
-            if not p.empty:
-                prop_nome = safe_str(p.iloc[0]['Nome Fornecedor'])
-                prop_cnpj = safe_str(p.iloc[0]['Cnpj/Cpf'])
-            else:
-                prop_nome = ''
-                prop_cnpj = ''
-            veiculos.append({
-                'placa': placa,
-                'marca': marca,
-                'modelo': modelo,
-                'ano': ano,
-                'rntrc': rntrc_veic,
-                'prop_nome': prop_nome,
-                'prop_cnpj': prop_cnpj,
-                'row': row
-            })
-    return veiculos
-
-def buscar_veiculo_por_placa(df_veic_antt, termo, df_forn):
-    """Busca veículo por placa (ou parte) e retorna com os dados do transportador via RNTRC."""
+def buscar_veiculo_por_placa(df_veic_antt, df_veic_compl, df_forn, df_cond, termo):
+    """Busca veículos por placa (ou parte) e retorna lista com dados."""
     if not termo:
         return []
     mask = df_veic_antt['Placa'].str.upper().str.contains(termo.upper(), na=False)
     resultados = df_veic_antt[mask]
     veiculos = []
-    col_rntrc_veic = get_rntrc_column(df_veic_antt)
-    col_rntrc_forn = get_rntrc_column(df_forn)
     for _, row in resultados.iterrows():
         placa = safe_str(row['Placa'])
+        placa_limpa = limpar_placa(placa)
         marca = safe_str(row.get('Marca', ''))
         modelo = safe_str(row.get('Modelo', ''))
         ano = safe_str(row.get('Ano', ''))
-        rntrc_veic = safe_str(row.get(col_rntrc_veic, '')) if col_rntrc_veic else ''
+        renavan = safe_str(row.get('Renavan', ''))
+        n_equip = ''
+        if not df_veic_compl.empty:
+            vc = df_veic_compl[df_veic_compl['Placa'].apply(limpar_placa) == placa_limpa]
+            if not vc.empty:
+                rv = vc.iloc[0]
+                marca = safe_str(rv.get('Marca', '')) or marca
+                modelo = safe_str(rv.get('Modelo', '')) or modelo
+                n_equip = safe_str(rv.get('Nº Equipamento', ''))
+        prop_cnpj = limpar_cpf_cnpj(row.get('Proprietário Cnpj', ''))
         prop_nome = ''
-        prop_cnpj = ''
-        if col_rntrc_forn and col_rntrc_veic and rntrc_veic:
-            p = df_forn[df_forn[col_rntrc_forn].apply(limpar_cpf_cnpj) == limpar_cpf_cnpj(rntrc_veic)]
+        prop_rntrc = ''
+        if prop_cnpj:
+            p = df_forn[df_forn['Cnpj/Cpf'].apply(limpar_cpf_cnpj) == prop_cnpj]
             if not p.empty:
                 prop_nome = safe_str(p.iloc[0]['Nome Fornecedor'])
-                prop_cnpj = safe_str(p.iloc[0]['Cnpj/Cpf'])
-        # Fallback: se não achou pelo RNTRC, tenta pelo proprietário
-        if not prop_nome:
-            prop_cnpj_fallback = limpar_cpf_cnpj(row.get('Proprietário Cnpj', ''))
-            if prop_cnpj_fallback:
-                p2 = df_forn[df_forn['Cnpj/Cpf'].apply(limpar_cpf_cnpj) == prop_cnpj_fallback]
-                if not p2.empty:
-                    prop_nome = safe_str(p2.iloc[0]['Nome Fornecedor'])
-                    prop_cnpj = safe_str(p2.iloc[0]['Cnpj/Cpf'])
+                prop_rntrc = safe_str(p.iloc[0].get('Rntrc', ''))
+        mot_cpf = ''
+        for col in COLUNAS_MOTORISTA:
+            if col in row:
+                val = row.get(col, '')
+                if val and str(val).strip():
+                    mot_cpf = limpar_cpf_cnpj(val)
+                    if mot_cpf:
+                        break
+        if not mot_cpf and not df_veic_compl.empty:
+            vc = df_veic_compl[df_veic_compl['Placa'].apply(limpar_placa) == placa_limpa]
+            if not vc.empty:
+                for col in COLUNAS_MOTORISTA:
+                    if col in vc.columns:
+                        val = vc.iloc[0].get(col, '')
+                        if val and str(val).strip():
+                            mot_cpf = limpar_cpf_cnpj(val)
+                            if mot_cpf:
+                                break
+        mot_nome = ''
+        if mot_cpf:
+            m = df_cond[df_cond['CPF N°'].apply(limpar_cpf_cnpj) == mot_cpf]
+            if not m.empty:
+                mot_nome = safe_str(m.iloc[0]['Nome'])
+            else:
+                m2 = df_forn[df_forn['Cnpj/Cpf'].apply(limpar_cpf_cnpj) == mot_cpf]
+                if not m2.empty:
+                    mot_nome = safe_str(m2.iloc[0]['Nome Fornecedor'])
         veiculos.append({
             'placa': placa,
             'marca': marca,
             'modelo': modelo,
             'ano': ano,
-            'rntrc': rntrc_veic,
-            'prop_nome': prop_nome,
+            'renavan': renavan,
+            'n_equipamento': n_equip,
             'prop_cnpj': prop_cnpj,
-            'row': row
+            'prop_nome': prop_nome,
+            'prop_rntrc': prop_rntrc,
+            'mot_cpf': mot_cpf,
+            'mot_nome': mot_nome
         })
     return veiculos
 
-def obter_veiculos_do_transportador(rntrc, df_veic_antt, df_veic_compl, df_cond, df_forn):
-    """Retorna todos os veículos que possuem o mesmo RNTRC (transportador)."""
-    if not rntrc:
+def obter_veiculos_do_proprietario(cnpj_prop, df_veic_antt, df_veic_compl, df_cond, df_forn):
+    """Retorna todos os veículos de um determinado CNPJ/CPF (proprietário)."""
+    cnpj_limpo = limpar_cpf_cnpj(cnpj_prop)
+    if not cnpj_limpo:
         return []
-    rntrc_limpo = limpar_cpf_cnpj(rntrc)
-    if not rntrc_limpo:
-        return []
-    col_rntrc_veic = get_rntrc_column(df_veic_antt)
-    if col_rntrc_veic is None:
-        st.warning("⚠️ Coluna de RNTRC não encontrada em veículos. Não é possível listar veículos do transportador.")
-        return []
-    
-    mask = df_veic_antt[col_rntrc_veic].apply(limpar_cpf_cnpj) == rntrc_limpo
+    mask = df_veic_antt['Proprietário Cnpj'].apply(limpar_cpf_cnpj) == cnpj_limpo
     veiculos = []
     for _, row in df_veic_antt[mask].iterrows():
         placa = safe_str(row['Placa'])
@@ -377,6 +296,7 @@ def obter_veiculos_do_transportador(rntrc, df_veic_antt, df_veic_compl, df_cond,
     return veiculos
 
 def obter_motoristas_dos_veiculos(veiculos, df_condutores, df_fornecedores):
+    """Extrai motoristas únicos a partir da lista de veículos."""
     cpfs_vistos = set()
     motoristas = []
     for v in veiculos:
@@ -406,6 +326,7 @@ def obter_motoristas_dos_veiculos(veiculos, df_condutores, df_fornecedores):
     return motoristas
 
 def obter_todos_condutores_da_base(df_condutores, df_fornecedores):
+    """Retorna todos os condutores (da planilha condutores + fornecedores PF)."""
     condutores = []
     cpfs_vistos = set()
     for _, row in df_condutores.iterrows():
@@ -437,11 +358,10 @@ def obter_todos_condutores_da_base(df_condutores, df_fornecedores):
                 cpfs_vistos.add(cpf_limpo)
     return condutores
 
-def buscar_antt(transportador, veiculos_selecionados, df_veiculos_antt, df_veiculos_compl):
-    antt = transportador.get('rntrc', '')
+def buscar_antt(proprietario, veiculos_selecionados, df_veiculos_antt, df_veiculos_compl):
+    antt = proprietario.get('rntrc', '')
     if antt and antt.lower() != 'nan':
         return antt
-    # Fallback: busca nos veículos
     for v in veiculos_selecionados:
         placa_limpa = limpar_placa(v['placa'])
         if not df_veiculos_compl.empty:
@@ -450,21 +370,14 @@ def buscar_antt(transportador, veiculos_selecionados, df_veiculos_antt, df_veicu
                 antt_tmp = safe_str(vc.iloc[0].get('ANTT/RNTRC nº', ''))
                 if antt_tmp and antt_tmp.lower() != 'nan':
                     return antt_tmp
-    col_rntrc = get_rntrc_column(df_veiculos_antt)
-    if col_rntrc:
+    if 'Rntrc' in df_veiculos_antt.columns:
         for v in veiculos_selecionados:
             placa_limpa = limpar_placa(v['placa'])
             va = df_veiculos_antt[df_veiculos_antt['Placa'].apply(limpar_placa) == placa_limpa]
             if not va.empty:
-                antt_tmp = safe_str(va.iloc[0].get(col_rntrc, ''))
+                antt_tmp = safe_str(va.iloc[0].get('Rntrc', ''))
                 if antt_tmp and antt_tmp.lower() != 'nan':
                     return antt_tmp
-    return ''
-
-def buscar_serial(veiculos_selecionados):
-    for v in veiculos_selecionados:
-        if v.get('n_equipamento') and v['n_equipamento'].lower() != 'nan':
-            return v['n_equipamento']
     return ''
 
 # ============================================================
@@ -474,23 +387,24 @@ def buscar_serial(veiculos_selecionados):
 # --- Verificar arquivos ---
 faltantes = verificar_arquivos()
 if faltantes:
-    st.warning(f"⚠️ Arquivos não encontrados na pasta `dados/`: {', '.join(faltantes)}")
-    st.info("📂 Certifique-se de que todos os arquivos estejam na pasta `dados/`.")
+    st.warning(f"⚠️ Arquivos não encontrados: {', '.join(faltantes)}")
+    st.info("Certifique-se de que todos os arquivos estejam no mesmo diretório do app.")
     st.stop()
 else:
-    st.success("✅ Todos os arquivos encontrados na pasta `dados/`!")
+    st.success("✅ Todos os arquivos encontrados!")
 
 # --- Carregar dados ---
-df_fornecedores = carregar_excel(ARQUIVOS["fornecedores"], header=4)
-df_veiculos_antt = carregar_excel(ARQUIVOS["veiculos_antt"], header=4)
-df_condutores = carregar_excel(ARQUIVOS["condutores"], header=4)
-df_veiculos_compl = carregar_excel(ARQUIVOS["veiculos_compl"], header=4)
-template_bytes = carregar_template(ARQUIVOS["template"])
+df_fornecedores = carregar_excel(FORNECEDORES, header=4)
+df_veiculos_antt = carregar_excel(VEICULOS_ANTT, header=4)
+df_condutores = carregar_excel(CONDUTORES, header=4)
+df_veiculos_compl = carregar_excel(VEICULOS_COMPL, header=4)
+template_bytes = carregar_template(TEMPLATE)
 
 if any(df is None for df in [df_fornecedores, df_veiculos_antt, df_condutores, df_veiculos_compl]) or template_bytes is None:
-    st.error("❌ Erro ao carregar um ou mais arquivos.")
+    st.error("❌ Erro ao carregar um ou mais arquivos. Verifique os logs.")
     st.stop()
 
+# Limpeza básica
 for df in [df_fornecedores, df_veiculos_antt, df_condutores, df_veiculos_compl]:
     df.dropna(how='all', inplace=True)
     df.columns = df.columns.str.strip()
@@ -500,75 +414,116 @@ for df in [df_fornecedores, df_veiculos_antt, df_condutores, df_veiculos_compl]:
 # ============================================================
 if "etapa" not in st.session_state:
     st.session_state.etapa = "busca"
+if "resultados_busca" not in st.session_state:
+    st.session_state.resultados_busca = []
 if "veiculo_escolhido" not in st.session_state:
     st.session_state.veiculo_escolhido = None
-if "transportador" not in st.session_state:
-    st.session_state.transportador = None
+if "proprietario" not in st.session_state:
+    st.session_state.proprietario = None
 if "todos_veiculos" not in st.session_state:
     st.session_state.todos_veiculos = []
 if "veiculos_selecionados" not in st.session_state:
     st.session_state.veiculos_selecionados = []
+if "motoristas_disponiveis" not in st.session_state:
+    st.session_state.motoristas_disponiveis = []
 if "motoristas_selecionados" not in st.session_state:
     st.session_state.motoristas_selecionados = []
+if "antt" not in st.session_state:
+    st.session_state.antt = ""
+if "serial" not in st.session_state:
+    st.session_state.serial = ""
 
 # ============================================================
-# ETAPA 1: BUSCA (por placa OU por nome do transportador)
+# ETAPA 1: BUSCA POR PLACA
 # ============================================================
-st.header("🔍 1. Buscar Veículo")
+if st.session_state.etapa == "busca":
+    st.header("🔍 1. Buscar Veículo")
 
-col_busca1, col_busca2 = st.columns(2)
+    termo_busca = st.text_input("Digite a placa (ou parte):", key="busca_placa")
+    if st.button("Buscar", key="botao_buscar"):
+        if termo_busca:
+            st.session_state.resultados_busca = buscar_veiculo_por_placa(
+                df_veiculos_antt, df_veiculos_compl, df_fornecedores, df_condutores, termo_busca
+            )
+        else:
+            st.warning("Digite um termo para buscar.")
 
-with col_busca1:
-    modo_busca = st.radio("Buscar por:", ["Placa", "Nome do Transportador (Fornecedor)"], horizontal=True)
-
-with col_busca2:
-    if modo_busca == "Placa":
-        termo_busca = st.text_input("Digite a placa (ou parte):", key="placa_busca")
-    else:
-        termo_busca = st.text_input("Digite o nome do transportador (ou parte):", key="nome_busca")
-
-resultados = []
-if termo_busca:
-    if modo_busca == "Placa":
-        resultados = buscar_veiculo_por_placa(df_veiculos_antt, termo_busca, df_fornecedores)
-    else:
-        resultados = buscar_veiculos_por_nome(df_veiculos_antt, df_fornecedores, termo_busca)
-
-if resultados:
-    st.success(f"✅ {len(resultados)} veículo(s) encontrado(s).")
-    
-    opcoes = []
-    for v in resultados:
-        opcoes.append(f"{v['placa']} - {v['marca']} {v['modelo']} ({v['ano']}) - Transportador: {v['prop_nome'] or 'N/I'}")
-    
-    selecao = st.selectbox("Selecione o veículo principal:", opcoes, key="selecao_veiculo_result")
-    
-    if st.button("✅ Confirmar veículo"):
-        idx = opcoes.index(selecao)
-        st.session_state.veiculo_escolhido = resultados[idx]
-        st.session_state.etapa = "confirmar_transportador"
-        st.rerun()
-else:
-    if termo_busca:
-        st.warning("Nenhum veículo encontrado.")
+    if st.session_state.resultados_busca:
+        st.success(f"✅ {len(st.session_state.resultados_busca)} veículo(s) encontrado(s).")
+        opcoes = []
+        for v in st.session_state.resultados_busca:
+            desc = f"{v['marca']} {v['modelo']}".strip() or "Sem descrição"
+            opcoes.append(f"{v['placa']} - {desc} ({v['ano']}) | Proprietário: {v['prop_nome'] or 'N/I'}")
+        selecao = st.selectbox("Selecione o veículo principal:", opcoes, key="selecao_veiculo")
+        if st.button("✅ Confirmar veículo", key="confirma_veiculo"):
+            idx = opcoes.index(selecao)
+            st.session_state.veiculo_escolhido = st.session_state.resultados_busca[idx]
+            st.session_state.etapa = "confirmar_proprietario"
+            st.rerun()
+    elif termo_busca:
+        st.warning("Nenhum veículo encontrado com esse termo.")
 
 # ============================================================
-# ETAPA 2: CONFIRMAR TRANSPORTADOR (pelo RNTRC)
+# ETAPA 2: CONFIRMAR PROPRIETÁRIO (TRANSPORTADOR)
 # ============================================================
-if st.session_state.etapa == "confirmar_transportador":
+if st.session_state.etapa == "confirmar_proprietario":
+    st.header("👤 2. Confirmar Transportador (Proprietário)")
+
     veic = st.session_state.veiculo_escolhido
-    st.header("👤 2. Confirmar Transportador")
+    prop_sugerido = None
+    cnpj_prop = veic.get('prop_cnpj')
+    if cnpj_prop:
+        p = df_fornecedores[df_fornecedores['Cnpj/Cpf'].apply(limpar_cpf_cnpj) == cnpj_prop]
+        if not p.empty:
+            row = p.iloc[0]
+            prop_sugerido = {
+                'nome': safe_str(row['Nome Fornecedor']),
+                'cpf_cnpj': safe_str(row['Cnpj/Cpf']),
+                'endereco': safe_str(row.get('Endereço', '')),
+                'bairro': safe_str(row.get('Bairro', '')),
+                'cidade': safe_str(row.get('Cidade', '')),
+                'uf': safe_str(row.get('UF', '')),
+                'data_inclusao': safe_str(row.get('Data Inclusão', '')),
+                'rntrc': safe_str(row.get('Rntrc', ''))
+            }
 
-    rntrc_veic = veic.get('rntrc', '')
-    transportador = None
+    if prop_sugerido:
+        st.write(f"**Nome:** {prop_sugerido['nome']}")
+        st.write(f"**CPF/CNPJ:** {formatar_cpf_cnpj(prop_sugerido['cpf_cnpj'])}")
+        st.write(f"**Endereço:** {prop_sugerido['endereco']}, {prop_sugerido['bairro']}, {prop_sugerido['cidade']}/{prop_sugerido['uf']}")
+        st.write(f"**RNTRC:** {prop_sugerido['rntrc']}")
+        if st.button("✅ Confirmar este proprietário", key="confirma_prop"):
+            st.session_state.proprietario = prop_sugerido
+            st.session_state.etapa = "selecionar_veiculos"
+            # Obter todos os veículos do proprietário
+            st.session_state.todos_veiculos = obter_veiculos_do_proprietario(
+                cnpj_prop, df_veiculos_antt, df_veiculos_compl, df_condutores, df_fornecedores
+            )
+            if not st.session_state.todos_veiculos:
+                st.session_state.todos_veiculos = [veic]  # fallback
+            st.rerun()
+    else:
+        st.warning("Proprietário não encontrado na base. Selecione manualmente:")
 
-    if rntrc_veic:
-        col_rntrc_forn = get_rntrc_column(df_fornecedores)
-        if col_rntrc_forn:
-            p = df_fornecedores[df_fornecedores[col_rntrc_forn].apply(limpar_cpf_cnpj) == limpar_cpf_cnpj(rntrc_veic)]
-            if not p.empty:
-                row = p.iloc[0]
-                transportador = {
+    # Seleção manual via lista de fornecedores
+    with st.expander("🔄 Selecionar proprietário manualmente"):
+        lista_forn = []
+        for _, row in df_fornecedores.iterrows():
+            nome = safe_str(row.get('Nome Fornecedor', ''))
+            cpf = safe_str(row.get('Cnpj/Cpf', ''))
+            if nome and cpf:
+                lista_forn.append({
+                    'nome': nome,
+                    'cpf_cnpj': cpf,
+                    'row': row
+                })
+        if lista_forn:
+            opcoes_forn = [f"{f['nome']} - {formatar_cpf_cnpj(f['cpf_cnpj'])}" for f in lista_forn]
+            escolha_forn = st.selectbox("Selecione um fornecedor:", opcoes_forn, key="manual_forn")
+            if st.button("Usar este fornecedor", key="usa_forn"):
+                idx = opcoes_forn.index(escolha_forn)
+                row = lista_forn[idx]['row']
+                prop_manual = {
                     'nome': safe_str(row['Nome Fornecedor']),
                     'cpf_cnpj': safe_str(row['Cnpj/Cpf']),
                     'endereco': safe_str(row.get('Endereço', '')),
@@ -576,209 +531,131 @@ if st.session_state.etapa == "confirmar_transportador":
                     'cidade': safe_str(row.get('Cidade', '')),
                     'uf': safe_str(row.get('UF', '')),
                     'data_inclusao': safe_str(row.get('Data Inclusão', '')),
-                    'rntrc': rntrc_veic
+                    'rntrc': safe_str(row.get('Rntrc', ''))
                 }
-
-    if transportador:
-        st.write(f"**Nome:** {transportador['nome']}")
-        st.write(f"**CPF/CNPJ:** {formatar_cpf_cnpj(transportador['cpf_cnpj'])}")
-        st.write(f"**RNTRC:** {transportador['rntrc']}")
-        st.write(f"**Endereço:** {transportador['endereco']}, {transportador['bairro']}, {transportador['cidade']}/{transportador['uf']}")
-        if st.button("✅ Confirmar Transportador"):
-            st.session_state.transportador = transportador
-            st.session_state.etapa = "selecionar_veiculos"
-            st.session_state.todos_veiculos = obter_veiculos_do_transportador(
-                transportador['rntrc'], df_veiculos_antt, df_veiculos_compl, df_condutores, df_fornecedores
-            )
-            if not st.session_state.todos_veiculos:
-                st.session_state.todos_veiculos = [{
-                    'placa': veic['placa'],
-                    'marca': veic['marca'],
-                    'modelo': veic['modelo'],
-                    'ano': veic['ano'],
-                    'renavan': '',
-                    'n_equipamento': '',
-                    'mot_cpf': '',
-                    'mot_nome': ''
-                }]
-            st.rerun()
-    else:
-        st.warning("Transportador não encontrado na base para o RNTRC deste veículo. Preencha manualmente:")
-        with st.form("manual_transportador"):
-            nome = st.text_input("Nome do Transportador:", value=veic.get('prop_nome', ''))
-            cpf_cnpj = st.text_input("CPF/CNPJ:", value=veic.get('prop_cnpj', ''))
-            endereco = st.text_input("Endereço:")
-            bairro = st.text_input("Bairro:")
-            cidade = st.text_input("Cidade:")
-            uf = st.text_input("UF:")
-            data_inclusao = st.text_input("Data de inclusão:")
-            rntrc_manual = st.text_input("RNTRC:", value=rntrc_veic)
-            if st.form_submit_button("✅ Confirmar"):
-                st.session_state.transportador = {
-                    'nome': nome,
-                    'cpf_cnpj': cpf_cnpj,
-                    'endereco': endereco,
-                    'bairro': bairro,
-                    'cidade': cidade,
-                    'uf': uf,
-                    'data_inclusao': data_inclusao,
-                    'rntrc': rntrc_manual
-                }
+                st.session_state.proprietario = prop_manual
                 st.session_state.etapa = "selecionar_veiculos"
-                if rntrc_manual:
-                    st.session_state.todos_veiculos = obter_veiculos_do_transportador(
-                        rntrc_manual, df_veiculos_antt, df_veiculos_compl, df_condutores, df_fornecedores
-                    )
+                cnpj_manual = limpar_cpf_cnpj(prop_manual['cpf_cnpj'])
+                st.session_state.todos_veiculos = obter_veiculos_do_proprietario(
+                    cnpj_manual, df_veiculos_antt, df_veiculos_compl, df_condutores, df_fornecedores
+                )
                 if not st.session_state.todos_veiculos:
-                    st.session_state.todos_veiculos = [{
-                        'placa': veic['placa'],
-                        'marca': veic['marca'],
-                        'modelo': veic['modelo'],
-                        'ano': veic['ano'],
-                        'renavan': '',
-                        'n_equipamento': '',
-                        'mot_cpf': '',
-                        'mot_nome': ''
-                    }]
+                    st.session_state.todos_veiculos = [veic]
                 st.rerun()
+        else:
+            st.info("Nenhum fornecedor cadastrado.")
 
 # ============================================================
-# ETAPA 3: SELECIONAR VEÍCULOS
+# ETAPA 3: SELECIONAR VEÍCULOS (com adição de extras)
 # ============================================================
 if st.session_state.etapa == "selecionar_veiculos":
     st.header("🚛 3. Selecionar Veículos para o Contrato")
 
-    if st.session_state.todos_veiculos:
-        opcoes_veiculos = [f"{v['placa']} - {v['marca']} {v['modelo']} ({v['ano']})" for v in st.session_state.todos_veiculos]
-        selecionados = st.multiselect(
-            "Veículos selecionados (o primeiro será o principal):",
-            opcoes_veiculos,
-            default=opcoes_veiculos[:1]
-        )
-        if selecionados:
-            st.session_state.veiculos_selecionados = [st.session_state.todos_veiculos[opcoes_veiculos.index(s)] for s in selecionados]
-        else:
-            st.warning("Selecione pelo menos um veículo.")
-    else:
-        st.warning("Nenhum veículo disponível.")
+    if not st.session_state.todos_veiculos:
+        st.warning("Nenhum veículo disponível. Volte e confirme o proprietário.")
+        if st.button("Voltar"):
+            st.session_state.etapa = "busca"
+            st.rerun()
+        st.stop()
 
-    # Expandir para adicionar veículo extra da base completa
+    # Exibir lista atual de veículos
+    opcoes_veiculos = [f"{v['placa']} - {v['marca']} {v['modelo']} ({v['ano']})" for v in st.session_state.todos_veiculos]
+    selecionados = st.multiselect(
+        "Selecione os veículos que farão parte do contrato (o primeiro será o principal):",
+        opcoes_veiculos,
+        default=opcoes_veiculos[:1]
+    )
+    if selecionados:
+        st.session_state.veiculos_selecionados = [st.session_state.todos_veiculos[opcoes_veiculos.index(s)] for s in selecionados]
+    else:
+        st.warning("Selecione pelo menos um veículo.")
+
+    # Adicionar veículo extra da base completa
     with st.expander("➕ Adicionar veículo extra da base completa"):
-        modo_busca_extra = st.radio("Como buscar?", ["Por placa", "Por nome do transportador", "Listar todos (filtrar)"], key="modo_busca_extra")
-        if modo_busca_extra == "Por placa":
+        modo_extra = st.radio("Modo de busca:", ["Por placa", "Listar todos (filtrar)"], key="modo_extra")
+
+        if modo_extra == "Por placa":
             placa_extra = st.text_input("Digite a placa (ou parte):", key="placa_extra")
-            if placa_extra:
-                extras = buscar_veiculo_por_placa(df_veiculos_antt, placa_extra, df_fornecedores)
-                if extras:
-                    rntrc_atual = st.session_state.transportador.get('rntrc', '') if st.session_state.transportador else ''
-                    if rntrc_atual:
-                        col_rntrc_veic = get_rntrc_column(df_veiculos_antt)
-                        if col_rntrc_veic:
-                            extras = [e for e in extras if limpar_cpf_cnpj(e.get('rntrc', '')) == limpar_cpf_cnpj(rntrc_atual)]
+            if st.button("Buscar veículo extra", key="buscar_extra"):
+                if placa_extra:
+                    extras = buscar_veiculo_por_placa(
+                        df_veiculos_antt, df_veiculos_compl, df_fornecedores, df_condutores, placa_extra
+                    )
                     if extras:
-                        opcoes_extra = [f"{v['placa']} - {v['marca']} {v['modelo']} ({v['ano']})" for v in extras]
-                        escolha_extra = st.selectbox("Selecione o veículo:", opcoes_extra, key="escolha_extra")
-                        if st.button("➕ Adicionar", key="add_veic_extra"):
-                            idx = opcoes_extra.index(escolha_extra)
-                            novo = {
-                                'placa': extras[idx]['placa'],
-                                'marca': extras[idx]['marca'],
-                                'modelo': extras[idx]['modelo'],
-                                'ano': extras[idx]['ano'],
-                                'renavan': '',
-                                'n_equipamento': '',
-                                'mot_cpf': '',
-                                'mot_nome': ''
-                            }
-                            if any(limpar_placa(v['placa']) == limpar_placa(novo['placa']) for v in st.session_state.todos_veiculos):
-                                st.warning("Veículo já está na lista.")
-                            else:
-                                st.session_state.todos_veiculos.append(novo)
-                                st.success(f"✅ {novo['placa']} adicionado!")
-                                st.rerun()
+                        st.session_state._extras_temp = extras
                     else:
-                        st.warning("Nenhum veículo com o mesmo RNTRC encontrado.")
-                else:
-                    st.warning("Nenhum veículo encontrado.")
-        elif modo_busca_extra == "Por nome do transportador":
-            nome_extra = st.text_input("Digite o nome do transportador (ou parte):", key="nome_extra")
-            if nome_extra:
-                extras = buscar_veiculos_por_nome(df_veiculos_antt, df_fornecedores, nome_extra)
-                rntrc_atual = st.session_state.transportador.get('rntrc', '') if st.session_state.transportador else ''
-                if rntrc_atual:
-                    extras = [e for e in extras if limpar_cpf_cnpj(e.get('rntrc', '')) == limpar_cpf_cnpj(rntrc_atual)]
-                if extras:
-                    opcoes_extra = [f"{v['placa']} - {v['marca']} {v['modelo']} ({v['ano']}) - Transportador: {v['prop_nome']}" for v in extras]
-                    escolha_extra = st.selectbox("Selecione o veículo:", opcoes_extra, key="escolha_extra_nome")
-                    if st.button("➕ Adicionar", key="add_veic_extra_nome"):
-                        idx = opcoes_extra.index(escolha_extra)
-                        novo = {
-                            'placa': extras[idx]['placa'],
-                            'marca': extras[idx]['marca'],
-                            'modelo': extras[idx]['modelo'],
-                            'ano': extras[idx]['ano'],
-                            'renavan': '',
-                            'n_equipamento': '',
-                            'mot_cpf': '',
-                            'mot_nome': ''
-                        }
-                        if any(limpar_placa(v['placa']) == limpar_placa(novo['placa']) for v in st.session_state.todos_veiculos):
-                            st.warning("Veículo já está na lista.")
-                        else:
-                            st.session_state.todos_veiculos.append(novo)
-                            st.success(f"✅ {novo['placa']} adicionado!")
-                            st.rerun()
-                else:
-                    st.warning("Nenhum veículo com o mesmo RNTRC encontrado.")
-        else:
-            # Listar todos com filtro por placa/modelo, mas restringir ao RNTRC atual
-            filtro = st.text_input("Filtrar por placa/modelo (opcional):", key="filtro_veic")
-            rntrc_atual = st.session_state.transportador.get('rntrc', '') if st.session_state.transportador else ''
-            col_rntrc_veic = get_rntrc_column(df_veiculos_antt)
+                        st.warning("Nenhum veículo encontrado.")
+            if "_extras_temp" in st.session_state and st.session_state._extras_temp:
+                extras = st.session_state._extras_temp
+                opcoes_extra = [f"{v['placa']} - {v['marca']} {v['modelo']} ({v['ano']})" for v in extras]
+                escolha_extra = st.selectbox("Selecione o veículo:", opcoes_extra, key="escolha_extra")
+                if st.button("➕ Adicionar este veículo", key="add_extra"):
+                    idx = opcoes_extra.index(escolha_extra)
+                    novo = extras[idx]
+                    # Verificar duplicata
+                    if any(limpar_placa(v['placa']) == limpar_placa(novo['placa']) for v in st.session_state.todos_veiculos):
+                        st.warning("Veículo já está na lista.")
+                    else:
+                        st.session_state.todos_veiculos.append(novo)
+                        st.success(f"✅ {novo['placa']} adicionado!")
+                        st.rerun()
+
+        else:  # Listar todos com filtro
+            filtro = st.text_input("Filtrar por placa ou modelo (opcional):", key="filtro_veic")
+            # Construir lista completa da base
             todos_da_base = []
             for _, row in df_veiculos_antt.iterrows():
-                if col_rntrc_veic and rntrc_atual:
-                    rntrc_veic = safe_str(row.get(col_rntrc_veic, ''))
-                    if limpar_cpf_cnpj(rntrc_veic) != limpar_cpf_cnpj(rntrc_atual):
-                        continue
-                pl = safe_str(row['Placa'])
-                ma = safe_str(row.get('Marca', ''))
-                mo = safe_str(row.get('Modelo', ''))
-                an = safe_str(row.get('Ano', ''))
+                placa = safe_str(row['Placa'])
+                marca = safe_str(row.get('Marca', ''))
+                modelo = safe_str(row.get('Modelo', ''))
+                ano = safe_str(row.get('Ano', ''))
+                placa_limpa = limpar_placa(placa)
+                n_equip = ''
+                if not df_veiculos_compl.empty:
+                    vc = df_veiculos_compl[df_veiculos_compl['Placa'].apply(limpar_placa) == placa_limpa]
+                    if not vc.empty:
+                        rv = vc.iloc[0]
+                        marca = safe_str(rv.get('Marca', '')) or marca
+                        modelo = safe_str(rv.get('Modelo', '')) or modelo
+                        n_equip = safe_str(rv.get('Nº Equipamento', ''))
+                # Obter proprietário para exibição
+                prop_cnpj = limpar_cpf_cnpj(row.get('Proprietário Cnpj', ''))
+                prop_nome = ''
+                if prop_cnpj:
+                    p = df_fornecedores[df_fornecedores['Cnpj/Cpf'].apply(limpar_cpf_cnpj) == prop_cnpj]
+                    if not p.empty:
+                        prop_nome = safe_str(p.iloc[0]['Nome Fornecedor'])
+                desc = f"{placa} - {marca} {modelo} ({ano}) - Proprietário: {prop_nome or 'N/I'}"
                 if filtro:
-                    if filtro.upper() in pl.upper() or filtro.upper() in ma.upper() or filtro.upper() in mo.upper():
-                        todos_da_base.append(f"{pl} - {ma} {mo} ({an})")
+                    if filtro.upper() in placa.upper() or filtro.upper() in marca.upper() or filtro.upper() in modelo.upper():
+                        todos_da_base.append({'desc': desc, 'veiculo': {'placa': placa, 'marca': marca, 'modelo': modelo, 'ano': ano, 'renavan': safe_str(row.get('Renavan', '')), 'n_equipamento': n_equip, 'mot_cpf': '', 'mot_nome': ''}})
                 else:
-                    todos_da_base.append(f"{pl} - {ma} {mo} ({an})")
+                    todos_da_base.append({'desc': desc, 'veiculo': {'placa': placa, 'marca': marca, 'modelo': modelo, 'ano': ano, 'renavan': safe_str(row.get('Renavan', '')), 'n_equipamento': n_equip, 'mot_cpf': '', 'mot_nome': ''}})
             if todos_da_base:
                 st.write(f"Total: {len(todos_da_base)} veículos")
-                escolha_lista = st.selectbox("Selecione um veículo:", todos_da_base[:50], key="escolha_lista")
+                opcoes_lista = [item['desc'] for item in todos_da_base[:50]]
+                escolha_lista = st.selectbox("Selecione um veículo para adicionar:", opcoes_lista, key="escolha_lista")
                 if st.button("➕ Adicionar da lista", key="add_lista"):
-                    placa_sel = escolha_lista.split(" - ")[0]
-                    mask = df_veiculos_antt['Placa'].apply(limpar_placa) == limpar_placa(placa_sel)
-                    if mask.any():
-                        row = df_veiculos_antt[mask].iloc[0]
-                        novo = {
-                            'placa': safe_str(row['Placa']),
-                            'marca': safe_str(row.get('Marca', '')),
-                            'modelo': safe_str(row.get('Modelo', '')),
-                            'ano': safe_str(row.get('Ano', '')),
-                            'renavan': safe_str(row.get('Renavan', '')),
-                            'n_equipamento': '',
-                            'mot_cpf': '',
-                            'mot_nome': ''
-                        }
-                        if any(limpar_placa(v['placa']) == limpar_placa(novo['placa']) for v in st.session_state.todos_veiculos):
-                            st.warning("Veículo já está na lista.")
-                        else:
-                            st.session_state.todos_veiculos.append(novo)
-                            st.success(f"✅ {novo['placa']} adicionado!")
-                            st.rerun()
+                    idx = opcoes_lista.index(escolha_lista)
+                    novo = todos_da_base[idx]['veiculo']
+                    if any(limpar_placa(v['placa']) == limpar_placa(novo['placa']) for v in st.session_state.todos_veiculos):
+                        st.warning("Veículo já está na lista.")
+                    else:
+                        st.session_state.todos_veiculos.append(novo)
+                        st.success(f"✅ {novo['placa']} adicionado!")
+                        st.rerun()
             else:
-                st.info("Nenhum veículo encontrado com esse filtro ou com o RNTRC do transportador.")
+                st.info("Nenhum veículo encontrado com esse filtro.")
 
     if st.session_state.veiculos_selecionados:
-        if st.button("➡️ Próximo (Motoristas)"):
+        if st.button("➡️ Próximo (Motoristas)", key="prox_motoristas"):
+            # Preparar motoristas disponíveis
+            motoristas_vinculados = obter_motoristas_dos_veiculos(st.session_state.todos_veiculos, df_condutores, df_fornecedores)
+            if not motoristas_vinculados:
+                # Buscar todos os condutores da base
+                st.info("Nenhum motorista vinculado aos veículos. Buscando todos os condutores da base...")
+                motoristas_vinculados = obter_todos_condutores_da_base(df_condutores, df_fornecedores)
+            st.session_state.motoristas_disponiveis = motoristas_vinculados
             st.session_state.etapa = "selecionar_motoristas"
             st.rerun()
 
@@ -788,35 +665,63 @@ if st.session_state.etapa == "selecionar_veiculos":
 if st.session_state.etapa == "selecionar_motoristas":
     st.header("👤 4. Selecionar Motoristas")
 
-    motoristas_auto = obter_motoristas_dos_veiculos(st.session_state.todos_veiculos, df_condutores, df_fornecedores)
-    if not motoristas_auto:
-        st.info("Nenhum motorista vinculado. Buscando todos os condutores da base...")
-        motoristas_auto = obter_todos_condutores_da_base(df_condutores, df_fornecedores)
-
-    if motoristas_auto:
-        opcoes_mot = [f"{m['nome']} (CPF: {formatar_cpf(m['cpf'])})" for m in motoristas_auto]
-        selecionados = st.multiselect(
+    # Exibir motoristas disponíveis
+    if st.session_state.motoristas_disponiveis:
+        opcoes_mot = [f"{m['nome']} (CPF: {formatar_cpf(m['cpf'])})" for m in st.session_state.motoristas_disponiveis]
+        selecionados_mot = st.multiselect(
             "Selecione os motoristas para o contrato (o primeiro será o principal):",
             opcoes_mot,
             default=opcoes_mot[:1] if opcoes_mot else []
         )
-        if selecionados:
-            st.session_state.motoristas_selecionados = [motoristas_auto[opcoes_mot.index(s)] for s in selecionados]
+        if selecionados_mot:
+            st.session_state.motoristas_selecionados = [st.session_state.motoristas_disponiveis[opcoes_mot.index(s)] for s in selecionados_mot]
         else:
             st.warning("Selecione pelo menos um motorista.")
     else:
-        st.warning("Nenhum motorista encontrado na base. Preencha manualmente:")
-        with st.form("motorista_manual"):
-            nome = st.text_input("Nome do motorista:")
-            cpf = st.text_input("CPF:")
-            cnh = st.text_input("CNH:")
-            rg = st.text_input("RG:")
-            if st.form_submit_button("✅ Adicionar motorista"):
-                st.session_state.motoristas_selecionados = [{'nome': nome, 'cpf': cpf, 'cnh': cnh, 'rg': rg}]
+        st.warning("Nenhum motorista disponível. Adicione manualmente ou da base.")
+
+    # Adicionar motoristas extras
+    with st.expander("➕ Adicionar motorista extra"):
+        st.subheader("Adicionar da base geral")
+        if st.button("Carregar condutores da base"):
+            todos_cond = obter_todos_condutores_da_base(df_condutores, df_fornecedores)
+            # Filtrar os que já estão na lista
+            cpfs_existentes = set(limpar_cpf_cnpj(m['cpf']) for m in st.session_state.motoristas_disponiveis)
+            novos = [c for c in todos_cond if limpar_cpf_cnpj(c['cpf']) not in cpfs_existentes]
+            if novos:
+                st.session_state._novos_condutores = novos
+                st.success(f"{len(novos)} novos condutores encontrados.")
+            else:
+                st.info("Todos os condutores já estão na lista.")
+
+        if "_novos_condutores" in st.session_state and st.session_state._novos_condutores:
+            novos = st.session_state._novos_condutores
+            opcoes_novos = [f"{m['nome']} (CPF: {formatar_cpf(m['cpf'])})" for m in novos]
+            selecionar_novos = st.multiselect("Selecione os que deseja adicionar:", opcoes_novos)
+            if st.button("➕ Adicionar selecionados", key="add_novos"):
+                indices = [opcoes_novos.index(s) for s in selecionar_novos]
+                for i in indices:
+                    st.session_state.motoristas_disponiveis.append(novos[i])
+                st.success(f"{len(indices)} motorista(s) adicionado(s).")
                 st.rerun()
 
+        st.subheader("Digitar manualmente")
+        with st.form("form_motorista_manual"):
+            nome = st.text_input("Nome:")
+            cpf = st.text_input("CPF (somente números):")
+            cnh = st.text_input("CNH:")
+            rg = st.text_input("RG:")
+            if st.form_submit_button("➕ Adicionar motorista manual"):
+                if nome and cpf:
+                    novo = {'nome': nome, 'cpf': cpf, 'cnh': cnh, 'rg': rg}
+                    st.session_state.motoristas_disponiveis.append(novo)
+                    st.success("Motorista adicionado!")
+                    st.rerun()
+                else:
+                    st.error("Nome e CPF são obrigatórios.")
+
     if st.session_state.motoristas_selecionados:
-        if st.button("➡️ Gerar Contrato"):
+        if st.button("➡️ Próximo (Gerar Contrato)", key="prox_contrato"):
             st.session_state.etapa = "gerar_contrato"
             st.rerun()
 
@@ -826,11 +731,11 @@ if st.session_state.etapa == "selecionar_motoristas":
 if st.session_state.etapa == "gerar_contrato":
     st.header("📄 5. Gerar Contrato")
 
-    transportador = st.session_state.transportador
+    proprietario = st.session_state.proprietario
     veiculos_selecionados = st.session_state.veiculos_selecionados
     motoristas_selecionados = st.session_state.motoristas_selecionados
 
-    if not transportador or not veiculos_selecionados or not motoristas_selecionados:
+    if not proprietario or not veiculos_selecionados or not motoristas_selecionados:
         st.error("Dados incompletos. Volte e preencha todas as etapas.")
         st.stop()
 
@@ -838,18 +743,19 @@ if st.session_state.etapa == "gerar_contrato":
 
     col1, col2 = st.columns(2)
     with col1:
-        antt = transportador.get('rntrc', '')
+        antt = proprietario.get('rntrc', '')
         if not antt:
-            antt = buscar_antt(transportador, veiculos_selecionados, df_veiculos_antt, df_veiculos_compl)
+            antt = buscar_antt(proprietario, veiculos_selecionados, df_veiculos_antt, df_veiculos_compl)
         if not antt:
-            antt = st.text_input("ANTT/RNTRC (não encontrado automaticamente):", value="", key="antt_manual")
-            if not antt:
-                st.warning("Digite o ANTT manualmente para continuar.")
-                st.stop()
+            antt = st.text_input("ANTT/RNTRC (não encontrado):", value="", key="antt_manual")
         else:
             st.write(f"✅ ANTT/RNTRC encontrado: {antt}")
 
-        serial = buscar_serial(veiculos_selecionados)
+        serial = ''
+        for v in veiculos_selecionados:
+            if v.get('n_equipamento') and v['n_equipamento'].lower() != 'nan':
+                serial = v['n_equipamento']
+                break
         if not serial:
             serial = st.text_input("Serial do rastreador:", value="A DEFINIR", key="serial_manual")
         else:
@@ -858,11 +764,11 @@ if st.session_state.etapa == "gerar_contrato":
         valor = st.text_input("Valor por entrega (R$):", value="X (a definir)", key="valor")
 
     with col2:
-        is_pf = len(limpar_cpf_cnpj(transportador['cpf_cnpj'])) == 11
+        is_pf = len(limpar_cpf_cnpj(proprietario['cpf_cnpj'])) == 11
         if not is_pf:
-            cidade = transportador.get('cidade', '')
-            uf = transportador.get('uf', '')
-            endereco_raw = transportador.get('endereco', '')
+            cidade = proprietario.get('cidade', '')
+            uf = proprietario.get('uf', '')
+            endereco_raw = proprietario.get('endereco', '')
             rua, _, _ = extrair_endereco_pj(endereco_raw)
             cep_sugerido = buscar_cep_online(rua, cidade, uf) if rua and cidade and uf else ''
             if cep_sugerido:
@@ -876,13 +782,13 @@ if st.session_state.etapa == "gerar_contrato":
             st.write("🔹 Pessoa Física – CEP será buscado do endereço.")
 
     if is_pf:
-        st.subheader("👤 Dados da Pessoa Física (Transportador)")
+        st.subheader("👤 Dados da Pessoa Física (Proprietário)")
         col3, col4 = st.columns(2)
         with col3:
             numero_casa = st.text_input("Número da residência:", value=st.session_state.get("numero_casa", ""), key="num_casa")
-            rg_prop = buscar_rg_proprietario(transportador['cpf_cnpj'], df_condutores, df_fornecedores)
+            rg_prop = buscar_rg_proprietario(proprietario['cpf_cnpj'], df_condutores, df_fornecedores)
             if not rg_prop:
-                rg_prop = st.text_input("RG do transportador:", value=st.session_state.get("rg_prop", ""), key="rg_prop")
+                rg_prop = st.text_input("RG do proprietário:", value=st.session_state.get("rg_prop", ""), key="rg_prop")
             else:
                 st.write(f"✅ RG encontrado: {rg_prop}")
         with col4:
@@ -892,15 +798,26 @@ if st.session_state.etapa == "gerar_contrato":
         rg_prop = ""
         estado_civil = ""
 
-    if st.button("🚀 Gerar Contrato"):
-        cpf_cnpj_limpo = limpar_cpf_cnpj(transportador['cpf_cnpj'])
+    # Mostrar resumo
+    st.subheader("📋 Resumo do Contrato")
+    st.write(f"**Transportador:** {proprietario['nome']} ({formatar_cpf_cnpj(proprietario['cpf_cnpj'])})")
+    st.write(f"**ANTT/RNTRC:** {antt}")
+    st.write("**Veículos selecionados:**")
+    for v in veiculos_selecionados:
+        st.write(f"  - {v['placa']} - {v['marca']} {v['modelo']} ({v['ano']})")
+    st.write("**Motoristas selecionados:**")
+    for m in motoristas_selecionados:
+        st.write(f"  - {m['nome']} (CPF: {formatar_cpf(m['cpf'])}, CNH: {m['cnh']})")
+
+    if st.button("🚀 Gerar Contrato", key="gerar"):
+        cpf_cnpj_limpo = limpar_cpf_cnpj(proprietario['cpf_cnpj'])
         is_pf = len(cpf_cnpj_limpo) == 11
 
-        dia_cad, mes_cad, ano_cad = formatar_data_cadastro(transportador.get('data_inclusao', ''))
-        cidade = transportador.get('cidade', '') or "Cotia"
-        uf = transportador.get('uf', '') or "SP"
-        endereco_raw = transportador.get('endereco', '')
-        bairro = transportador.get('bairro', '')
+        dia_cad, mes_cad, ano_cad = formatar_data_cadastro(proprietario.get('data_inclusao', ''))
+        cidade = proprietario.get('cidade', '') or "Cotia"
+        uf = proprietario.get('uf', '') or "SP"
+        endereco_raw = proprietario.get('endereco', '')
+        bairro = proprietario.get('bairro', '')
         endereco_completo = ', '.join(filter(None, [endereco_raw, bairro, cidade, uf])) or 'ENDEREÇO NÃO CADASTRADO'
 
         veiculo_principal = veiculos_selecionados[0]
@@ -913,7 +830,7 @@ if st.session_state.etapa == "gerar_contrato":
                 'cnh': m.get('cnh', ''),
             }
             for m in motoristas_selecionados
-        ]
+        ] or [{'nome': '', 'cpf': '', 'cnh': ''}]
 
         veiculos_lista = [
             {
@@ -922,7 +839,7 @@ if st.session_state.etapa == "gerar_contrato":
                 'renavam': v.get('renavan', ''),
             }
             for v in veiculos_selecionados
-        ]
+        ] or [{'modelo': '', 'ano': '', 'renavam': ''}]
 
         contexto = {
             'dia_cadastro': dia_cad,
@@ -946,12 +863,12 @@ if st.session_state.etapa == "gerar_contrato":
         }
 
         if is_pf:
-            rg_final = rg_prop or buscar_rg_proprietario(transportador['cpf_cnpj'], df_condutores, df_fornecedores) or ''
+            rg_final = rg_prop or buscar_rg_proprietario(proprietario['cpf_cnpj'], df_condutores, df_fornecedores) or ''
             contexto.update({
-                'nome_contratado_pf': transportador['nome'],
+                'nome_contratado_pf': proprietario['nome'],
                 'estado_civil': estado_civil,
                 'rg_contratado': rg_final,
-                'cpf_contratado': formatar_cpf(transportador['cpf_cnpj']),
+                'cpf_contratado': formatar_cpf(proprietario['cpf_cnpj']),
                 'numero_da_casa': numero_casa,
                 'razao_social_pj': '',
                 'cnpj_pj': '',
@@ -978,8 +895,8 @@ if st.session_state.etapa == "gerar_contrato":
                 'rg_contratado': '',
                 'cpf_contratado': '',
                 'numero_da_casa': '',
-                'razao_social_pj': transportador['nome'],
-                'cnpj_pj': formatar_cnpj(transportador['cpf_cnpj']),
+                'razao_social_pj': proprietario['nome'],
+                'cnpj_pj': formatar_cnpj(proprietario['cpf_cnpj']),
                 'rua_pj': rua,
                 'numero_pj': num,
                 'complemento_pj': comp,
@@ -995,7 +912,7 @@ if st.session_state.etapa == "gerar_contrato":
             doc.save(buffer)
             buffer.seek(0)
 
-            nome_arquivo = f"CONTRATO_{transportador['nome'].replace(' ', '_').upper()}_{veiculo_principal['placa']}.docx"
+            nome_arquivo = f"CONTRATO_{proprietario['nome'].replace(' ', '_').upper()}_{veiculo_principal['placa']}.docx"
             st.download_button(
                 label="📥 Baixar Contrato",
                 data=buffer,
