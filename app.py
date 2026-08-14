@@ -11,10 +11,10 @@ st.set_page_config(page_title="Gerador de Contratos", layout="wide")
 st.title("🚛 Gerador de Contratos de Transporte")
 
 # ============================================================
-# CONFIGURAÇÃO DOS ARQUIVOS (agora com caminho dados/)
+# CONFIGURAÇÃO DOS ARQUIVOS (com nomes atualizados)
 # ============================================================
-FORNECEDORES = os.path.join('dados', 'fornecedores_20260417_2_53XLS.xlsx')
-VEICULOS_ANTT = os.path.join('dados', 'Veiculos_20260417_3_15XLS.xlsx')
+FORNECEDORES = os.path.join('dados', 'fornecedores_.xlsx')
+VEICULOS_ANTT = os.path.join('dados', 'veiculos_.xlsx')
 CONDUTORES = os.path.join('dados', 'condutores.xlsx')
 VEICULOS_COMPL = os.path.join('dados', 'veiculos.xlsx')
 TEMPLATE = os.path.join('dados', 'template_contrato.docx')
@@ -432,6 +432,14 @@ if "antt" not in st.session_state:
     st.session_state.antt = ""
 if "serial" not in st.session_state:
     st.session_state.serial = ""
+if "cep_manual" not in st.session_state:
+    st.session_state.cep_manual = ""
+if "numero_casa" not in st.session_state:
+    st.session_state.numero_casa = ""
+if "rg_prop" not in st.session_state:
+    st.session_state.rg_prop = ""
+if "estado_civil" not in st.session_state:
+    st.session_state.estado_civil = ""
 
 # ============================================================
 # ETAPA 1: BUSCA POR PLACA
@@ -726,7 +734,7 @@ if st.session_state.etapa == "selecionar_motoristas":
             st.rerun()
 
 # ============================================================
-# ETAPA 5: GERAR CONTRATO
+# ETAPA 5: GERAR CONTRATO (com opção de número da casa)
 # ============================================================
 if st.session_state.etapa == "gerar_contrato":
     st.header("📄 5. Gerar Contrato")
@@ -781,11 +789,22 @@ if st.session_state.etapa == "gerar_contrato":
         else:
             st.write("🔹 Pessoa Física – CEP será buscado do endereço.")
 
+    # === OPÇÃO DE NÚMERO DA CASA ===
+    st.subheader("🏠 Endereço - Número da Casa")
+    numero_casa = st.text_input(
+        "Número da residência (deixe em branco se não houver):",
+        value=st.session_state.get("numero_casa", ""),
+        key="num_casa_input"
+    )
+    if numero_casa:
+        st.session_state.numero_casa = numero_casa
+    else:
+        st.session_state.numero_casa = ""
+
     if is_pf:
         st.subheader("👤 Dados da Pessoa Física (Proprietário)")
         col3, col4 = st.columns(2)
         with col3:
-            numero_casa = st.text_input("Número da residência:", value=st.session_state.get("numero_casa", ""), key="num_casa")
             rg_prop = buscar_rg_proprietario(proprietario['cpf_cnpj'], df_condutores, df_fornecedores)
             if not rg_prop:
                 rg_prop = st.text_input("RG do proprietário:", value=st.session_state.get("rg_prop", ""), key="rg_prop")
@@ -794,7 +813,6 @@ if st.session_state.etapa == "gerar_contrato":
         with col4:
             estado_civil = st.text_input("Estado civil:", value=st.session_state.get("estado_civil", ""), key="estado_civil")
     else:
-        numero_casa = ""
         rg_prop = ""
         estado_civil = ""
 
@@ -869,7 +887,7 @@ if st.session_state.etapa == "gerar_contrato":
                 'estado_civil': estado_civil,
                 'rg_contratado': rg_final,
                 'cpf_contratado': formatar_cpf(proprietario['cpf_cnpj']),
-                'numero_da_casa': numero_casa,
+                'numero_da_casa': st.session_state.numero_casa,
                 'razao_social_pj': '',
                 'cnpj_pj': '',
                 'rua_pj': '',
