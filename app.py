@@ -11,13 +11,13 @@ st.set_page_config(page_title="Gerador de Contratos", layout="wide")
 st.title("🚛 Gerador de Contratos de Transporte")
 
 # ============================================================
-# CONFIGURAÇÃO DOS ARQUIVOS (mesmos nomes do script)
+# CONFIGURAÇÃO DOS ARQUIVOS (agora com caminho dados/)
 # ============================================================
-FORNECEDORES = 'fornecedores_20260417_2_53XLS.xlsx'
-VEICULOS_ANTT = 'Veiculos_20260417_3_15XLS.xlsx'
-CONDUTORES = 'condutores.xlsx'
-VEICULOS_COMPL = 'veiculos.xlsx'
-TEMPLATE = 'template_contrato.docx'
+FORNECEDORES = os.path.join('dados', 'fornecedores_20260417_2_53XLS.xlsx')
+VEICULOS_ANTT = os.path.join('dados', 'Veiculos_20260417_3_15XLS.xlsx')
+CONDUTORES = os.path.join('dados', 'condutores.xlsx')
+VEICULOS_COMPL = os.path.join('dados', 'veiculos.xlsx')
+TEMPLATE = os.path.join('dados', 'template_contrato.docx')
 PASTA_SAIDA = 'contratos_gerados'
 
 if not os.path.exists(PASTA_SAIDA):
@@ -47,11 +47,11 @@ def verificar_arquivos():
     faltantes = []
     for arquivo in [FORNECEDORES, VEICULOS_ANTT, CONDUTORES, VEICULOS_COMPL, TEMPLATE]:
         if not os.path.exists(arquivo):
-            faltantes.append(arquivo)
+            faltantes.append(os.path.basename(arquivo))
     return faltantes
 
 # ============================================================
-# FUNÇÕES AUXILIARES (idênticas ao script)
+# FUNÇÕES AUXILIARES
 # ============================================================
 def limpar_cpf_cnpj(val):
     if pd.isna(val): return ''
@@ -158,7 +158,7 @@ def buscar_rg_proprietario(cpf_prop, df_cond, df_forn):
     return ''
 
 # ============================================================
-# FUNÇÕES DE NEGÓCIO (baseadas no script)
+# FUNÇÕES DE NEGÓCIO
 # ============================================================
 COLUNAS_MOTORISTA = ['Motorista Cnpj', 'Motorista CPF', 'Condutor CPF', 'Motorista', 'CPF Motorista', 'Condutor']
 
@@ -388,7 +388,7 @@ def buscar_antt(proprietario, veiculos_selecionados, df_veiculos_antt, df_veicul
 faltantes = verificar_arquivos()
 if faltantes:
     st.warning(f"⚠️ Arquivos não encontrados: {', '.join(faltantes)}")
-    st.info("Certifique-se de que todos os arquivos estejam no mesmo diretório do app.")
+    st.info("Certifique-se de que todos os arquivos estejam na pasta `dados/`.")
     st.stop()
 else:
     st.success("✅ Todos os arquivos encontrados!")
