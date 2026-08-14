@@ -172,9 +172,43 @@ def buscar_rg_proprietario(cpf_prop, df_cond, df_forn):
     return ''
 
 # ============================================================
-# FUNÇÕES DE NEGÓCIO ATUALIZADAS (BUSCA PELO RNTRC)
+# FUNÇÃO PARA IDENTIFICAR COLUNA DE RNTRC
+# ============================================================
+def get_rntrc_column(df):
+    """Retorna o nome da coluna de RNTRC em um DataFrame, ou None se não encontrar."""
+    possiveis = ['Rntrc', 'RNTRC', 'ANTT', 'ANTT/RNTRC', 'ANTT/RNTRC nº', 'Rntrc/ANTT']
+    for col in df.columns:
+        if col.strip().upper() in [p.upper() for p in possiveis]:
+            return col
+    return None
+
+# ============================================================
+# FUNÇÕES DE NEGÓCIO ATUALIZADAS (BUSCA PELO RNTRC, com fallback)
 # ============================================================
 COLUNAS_MOTORISTA = ['Motorista Cnpj', 'Motorista CPF', 'Condutor CPF', 'Motorista', 'CPF Motorista', 'Condutor']
+
+def buscar_veiculos_por_nome_fallback(df_veic_antt, df_forn, termo):
+    """Fallback: busca veículos pelo nome do proprietário (coluna Proprietário Cnpj)."""
+    termo_norm = normalizar_nome(termo)
+    veiculos = []
+    for _, row in df_veic_antt.iterrows():
+        prop_cnpj = limpar_cpf_cnpj(row.get('Proprietário Cnpj', ''))
+        if prop_cnpj:
+            p = df_forn[df_forn['Cnpj/Cpf'].apply(limpar_cpf_cnpj) == prop_cnpj]
+            if not p.empty:
+                nome_forn = safe_str(p.iloc[0]['Nome Fornecedor'])
+                if termo_norm in normalizar_nome(nome_forn):
+                    veiculos.append({
+                        'placa': safe_str(row['Placa']),
+                        'marca': safe_str(row.get('Marca', '')),
+                        'modelo': safe_str(row.get('Modelo', '')),
+                        'ano': safe_str(row.get('Ano', '')),
+                        'rntrc': '',
+                        'prop_nome': nome_forn,
+                        'prop_cnpj': prop_cnpj,
+                        'row': row
+                    })
+    return veiculos
 
 def buscar_veiculos_por_nome(df_veic_antt, df_forn, termo):
     """Busca veículos por parte do nome do transportador (fornecedor) e retorna com os dados do transportador (via RNTRC)."""
@@ -186,25 +220,34 @@ def buscar_veiculos_por_nome(df_veic_antt, df_forn, termo):
     fornecedores_filtrados = df_forn[mask_forn]
     if fornecedores_filtrados.empty:
         return []
+    
+    col_rntrc_forn = get_rntrc_column(df_forn)
+    if col_rntrc_forn is None:
+        st.warning("⚠️ Coluna de RNTRC não encontrada em fornecedores. Usando busca pelo CNPJ/CPF do proprietário.")
+        return buscar_veiculos_por_nome_fallback(df_veic_antt, df_forn, termo)
+    
     # Obter os RNTRCs desses fornecedores
     rntrcs = set()
     for _, row in fornecedores_filtrados.iterrows():
-        rntrc = safe_str(row.get('Rntrc', ''))
+        rntrc = safe_str(row.get(col_rntrc_forn, ''))
         if rntrc:
-            rntrcs.add(limpar_cpf_cnpj(rntrc))  # pode ser alfanumérico, mas normalizamos
+            rntrcs.add(limpar_cpf_cnpj(rntrc))
     if not rntrcs:
-        return []
-    # Filtrar veículos que tenham o RNTRC na lista
+        return buscar_veiculos_por_nome_fallback(df_veic_antt, df_forn, termo)
+    
+    col_rntrc_veic = get_rntrc_column(df_veic_antt)
+    if col_rntrc_veic is None:
+        return buscar_veiculos_por_nome_fallback(df_veic_antt, df_forn, termo)
+    
     veiculos = []
     for _, row in df_veic_antt.iterrows():
-        rntrc_veic = safe_str(row.get('Rntrc', ''))
+        rntrc_veic = safe_str(row.get(col_rntrc_veic, ''))
         if limpar_cpf_cnpj(rntrc_veic) in rntrcs:
             placa = safe_str(row['Placa'])
             marca = safe_str(row.get('Marca', ''))
             modelo = safe_str(row.get('Modelo', ''))
             ano = safe_str(row.get('Ano', ''))
-            # Buscar o fornecedor que tem esse RNTRC (transportador)
-            p = df_forn[df_forn['Rntrc'].apply(limpar_cpf_cnpj) == limpar_cpf_cnpj(rntrc_veic)]
+            p = df_forn[df_forn[col_rntrc_forn].apply(limpar_cpf_cnpj) == limpar_cpf_cnpj(rntrc_veic)]
             if not p.empty:
                 prop_nome = safe_str(p.iloc[0]['Nome Fornecedor'])
                 prop_cnpj = safe_str(p.iloc[0]['Cnpj/Cpf'])
@@ -230,20 +273,22 @@ def buscar_veiculo_por_placa(df_veic_antt, termo, df_forn):
     mask = df_veic_antt['Placa'].str.upper().str.contains(termo.upper(), na=False)
     resultados = df_veic_antt[mask]
     veiculos = []
+    col_rntrc_veic = get_rntrc_column(df_veic_antt)
+    col_rntrc_forn = get_rntrc_column(df_forn)
     for _, row in resultados.iterrows():
         placa = safe_str(row['Placa'])
         marca = safe_str(row.get('Marca', ''))
         modelo = safe_str(row.get('Modelo', ''))
         ano = safe_str(row.get('Ano', ''))
-        rntrc_veic = safe_str(row.get('Rntrc', ''))
+        rntrc_veic = safe_str(row.get(col_rntrc_veic, '')) if col_rntrc_veic else ''
         prop_nome = ''
         prop_cnpj = ''
-        if rntrc_veic:
-            p = df_forn[df_forn['Rntrc'].apply(limpar_cpf_cnpj) == limpar_cpf_cnpj(rntrc_veic)]
+        if col_rntrc_forn and col_rntrc_veic and rntrc_veic:
+            p = df_forn[df_forn[col_rntrc_forn].apply(limpar_cpf_cnpj) == limpar_cpf_cnpj(rntrc_veic)]
             if not p.empty:
                 prop_nome = safe_str(p.iloc[0]['Nome Fornecedor'])
                 prop_cnpj = safe_str(p.iloc[0]['Cnpj/Cpf'])
-        # Fallback: se não achou pelo RNTRC, tenta pelo proprietário (mantido para compatibilidade)
+        # Fallback: se não achou pelo RNTRC, tenta pelo proprietário
         if not prop_nome:
             prop_cnpj_fallback = limpar_cpf_cnpj(row.get('Proprietário Cnpj', ''))
             if prop_cnpj_fallback:
@@ -270,8 +315,12 @@ def obter_veiculos_do_transportador(rntrc, df_veic_antt, df_veic_compl, df_cond,
     rntrc_limpo = limpar_cpf_cnpj(rntrc)
     if not rntrc_limpo:
         return []
-    # Filtra veículos pelo RNTRC
-    mask = df_veic_antt['Rntrc'].apply(limpar_cpf_cnpj) == rntrc_limpo
+    col_rntrc_veic = get_rntrc_column(df_veic_antt)
+    if col_rntrc_veic is None:
+        st.warning("⚠️ Coluna de RNTRC não encontrada em veículos. Não é possível listar veículos do transportador.")
+        return []
+    
+    mask = df_veic_antt[col_rntrc_veic].apply(limpar_cpf_cnpj) == rntrc_limpo
     veiculos = []
     for _, row in df_veic_antt[mask].iterrows():
         placa = safe_str(row['Placa'])
@@ -388,9 +437,8 @@ def obter_todos_condutores_da_base(df_condutores, df_fornecedores):
                 cpfs_vistos.add(cpf_limpo)
     return condutores
 
-def buscar_antt(proprietario, veiculos_selecionados, df_veiculos_antt, df_veiculos_compl):
-    # Agora o proprietário já deve ter o RNTRC, mas mantemos a função para compatibilidade
-    antt = proprietario.get('rntrc', '')
+def buscar_antt(transportador, veiculos_selecionados, df_veiculos_antt, df_veiculos_compl):
+    antt = transportador.get('rntrc', '')
     if antt and antt.lower() != 'nan':
         return antt
     # Fallback: busca nos veículos
@@ -402,12 +450,13 @@ def buscar_antt(proprietario, veiculos_selecionados, df_veiculos_antt, df_veicul
                 antt_tmp = safe_str(vc.iloc[0].get('ANTT/RNTRC nº', ''))
                 if antt_tmp and antt_tmp.lower() != 'nan':
                     return antt_tmp
-    if 'Rntrc' in df_veiculos_antt.columns:
+    col_rntrc = get_rntrc_column(df_veiculos_antt)
+    if col_rntrc:
         for v in veiculos_selecionados:
             placa_limpa = limpar_placa(v['placa'])
             va = df_veiculos_antt[df_veiculos_antt['Placa'].apply(limpar_placa) == placa_limpa]
             if not va.empty:
-                antt_tmp = safe_str(va.iloc[0].get('Rntrc', ''))
+                antt_tmp = safe_str(va.iloc[0].get(col_rntrc, ''))
                 if antt_tmp and antt_tmp.lower() != 'nan':
                     return antt_tmp
     return ''
@@ -453,7 +502,7 @@ if "etapa" not in st.session_state:
     st.session_state.etapa = "busca"
 if "veiculo_escolhido" not in st.session_state:
     st.session_state.veiculo_escolhido = None
-if "transportador" not in st.session_state:        # ANTES: proprietario
+if "transportador" not in st.session_state:
     st.session_state.transportador = None
 if "todos_veiculos" not in st.session_state:
     st.session_state.todos_veiculos = []
@@ -488,7 +537,6 @@ if termo_busca:
 if resultados:
     st.success(f"✅ {len(resultados)} veículo(s) encontrado(s).")
     
-    # Exibir lista de veículos para seleção
     opcoes = []
     for v in resultados:
         opcoes.append(f"{v['placa']} - {v['marca']} {v['modelo']} ({v['ano']}) - Transportador: {v['prop_nome'] or 'N/I'}")
@@ -515,20 +563,21 @@ if st.session_state.etapa == "confirmar_transportador":
     transportador = None
 
     if rntrc_veic:
-        # Buscar fornecedor que tem este RNTRC
-        p = df_fornecedores[df_fornecedores['Rntrc'].apply(limpar_cpf_cnpj) == limpar_cpf_cnpj(rntrc_veic)]
-        if not p.empty:
-            row = p.iloc[0]
-            transportador = {
-                'nome': safe_str(row['Nome Fornecedor']),
-                'cpf_cnpj': safe_str(row['Cnpj/Cpf']),
-                'endereco': safe_str(row.get('Endereço', '')),
-                'bairro': safe_str(row.get('Bairro', '')),
-                'cidade': safe_str(row.get('Cidade', '')),
-                'uf': safe_str(row.get('UF', '')),
-                'data_inclusao': safe_str(row.get('Data Inclusão', '')),
-                'rntrc': rntrc_veic
-            }
+        col_rntrc_forn = get_rntrc_column(df_fornecedores)
+        if col_rntrc_forn:
+            p = df_fornecedores[df_fornecedores[col_rntrc_forn].apply(limpar_cpf_cnpj) == limpar_cpf_cnpj(rntrc_veic)]
+            if not p.empty:
+                row = p.iloc[0]
+                transportador = {
+                    'nome': safe_str(row['Nome Fornecedor']),
+                    'cpf_cnpj': safe_str(row['Cnpj/Cpf']),
+                    'endereco': safe_str(row.get('Endereço', '')),
+                    'bairro': safe_str(row.get('Bairro', '')),
+                    'cidade': safe_str(row.get('Cidade', '')),
+                    'uf': safe_str(row.get('UF', '')),
+                    'data_inclusao': safe_str(row.get('Data Inclusão', '')),
+                    'rntrc': rntrc_veic
+                }
 
     if transportador:
         st.write(f"**Nome:** {transportador['nome']}")
@@ -542,7 +591,6 @@ if st.session_state.etapa == "confirmar_transportador":
                 transportador['rntrc'], df_veiculos_antt, df_veiculos_compl, df_condutores, df_fornecedores
             )
             if not st.session_state.todos_veiculos:
-                # Fallback: adiciona o veículo escolhido
                 st.session_state.todos_veiculos = [{
                     'placa': veic['placa'],
                     'marca': veic['marca'],
@@ -614,7 +662,7 @@ if st.session_state.etapa == "selecionar_veiculos":
     else:
         st.warning("Nenhum veículo disponível.")
 
-    # Expandir para adicionar veículo extra da base completa (agora filtrando também pelo RNTRC do transportador)
+    # Expandir para adicionar veículo extra da base completa
     with st.expander("➕ Adicionar veículo extra da base completa"):
         modo_busca_extra = st.radio("Como buscar?", ["Por placa", "Por nome do transportador", "Listar todos (filtrar)"], key="modo_busca_extra")
         if modo_busca_extra == "Por placa":
@@ -622,10 +670,11 @@ if st.session_state.etapa == "selecionar_veiculos":
             if placa_extra:
                 extras = buscar_veiculo_por_placa(df_veiculos_antt, placa_extra, df_fornecedores)
                 if extras:
-                    # Filtrar apenas os que têm o mesmo RNTRC do transportador atual (se houver)
                     rntrc_atual = st.session_state.transportador.get('rntrc', '') if st.session_state.transportador else ''
                     if rntrc_atual:
-                        extras = [e for e in extras if limpar_cpf_cnpj(e.get('rntrc', '')) == limpar_cpf_cnpj(rntrc_atual)]
+                        col_rntrc_veic = get_rntrc_column(df_veiculos_antt)
+                        if col_rntrc_veic:
+                            extras = [e for e in extras if limpar_cpf_cnpj(e.get('rntrc', '')) == limpar_cpf_cnpj(rntrc_atual)]
                     if extras:
                         opcoes_extra = [f"{v['placa']} - {v['marca']} {v['modelo']} ({v['ano']})" for v in extras]
                         escolha_extra = st.selectbox("Selecione o veículo:", opcoes_extra, key="escolha_extra")
@@ -655,7 +704,6 @@ if st.session_state.etapa == "selecionar_veiculos":
             nome_extra = st.text_input("Digite o nome do transportador (ou parte):", key="nome_extra")
             if nome_extra:
                 extras = buscar_veiculos_por_nome(df_veiculos_antt, df_fornecedores, nome_extra)
-                # Filtrar pelo RNTRC atual (se houver)
                 rntrc_atual = st.session_state.transportador.get('rntrc', '') if st.session_state.transportador else ''
                 if rntrc_atual:
                     extras = [e for e in extras if limpar_cpf_cnpj(e.get('rntrc', '')) == limpar_cpf_cnpj(rntrc_atual)]
@@ -686,11 +734,13 @@ if st.session_state.etapa == "selecionar_veiculos":
             # Listar todos com filtro por placa/modelo, mas restringir ao RNTRC atual
             filtro = st.text_input("Filtrar por placa/modelo (opcional):", key="filtro_veic")
             rntrc_atual = st.session_state.transportador.get('rntrc', '') if st.session_state.transportador else ''
+            col_rntrc_veic = get_rntrc_column(df_veiculos_antt)
             todos_da_base = []
             for _, row in df_veiculos_antt.iterrows():
-                rntrc_veic = safe_str(row.get('Rntrc', ''))
-                if rntrc_atual and limpar_cpf_cnpj(rntrc_veic) != limpar_cpf_cnpj(rntrc_atual):
-                    continue
+                if col_rntrc_veic and rntrc_atual:
+                    rntrc_veic = safe_str(row.get(col_rntrc_veic, ''))
+                    if limpar_cpf_cnpj(rntrc_veic) != limpar_cpf_cnpj(rntrc_atual):
+                        continue
                 pl = safe_str(row['Placa'])
                 ma = safe_str(row.get('Marca', ''))
                 mo = safe_str(row.get('Modelo', ''))
@@ -788,7 +838,6 @@ if st.session_state.etapa == "gerar_contrato":
 
     col1, col2 = st.columns(2)
     with col1:
-        # O ANTT já deve estar no transportador, mas usamos a função para garantir
         antt = transportador.get('rntrc', '')
         if not antt:
             antt = buscar_antt(transportador, veiculos_selecionados, df_veiculos_antt, df_veiculos_compl)
